@@ -1,0 +1,103 @@
+//! End-to-end run of the `piv` binary on the sample clip. Ignored by default because the clip
+//! is not in git: `cargo test -p piv-cli -- --ignored`.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+fn clip() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clips/C0141.MP4")
+}
+
+#[test]
+#[ignore = "needs clips/C0141.MP4"]
+fn info_reports_capture_rate() {
+    let out = Command::new(env!("CARGO_BIN_EXE_piv"))
+        .arg("info")
+        .arg(clip())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("capture rate:   1000 fps"), "{text}");
+    assert!(text.contains("Sony DSC-RX100M5A"), "{text}");
+}
+
+#[test]
+#[ignore = "needs clips/C0141.MP4"]
+fn analyze_writes_hdf5_quiver_and_video() {
+    let dir = tempfile::tempdir().unwrap();
+    let h5 = dir.path().join("smoke.h5");
+    let out = Command::new(env!("CARGO_BIN_EXE_piv"))
+        .arg("analyze")
+        .arg(clip())
+        .arg("-o")
+        .arg(&h5)
+        .args([
+            "--start", "200", "--end", "260", "--stride", "5", "--quiver", "--video",
+        ])
+        .args([
+            "--fov-deg",
+            "84",
+            "--sheet-distance",
+            "0.3",
+            "--sheet-thickness-mm",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("analysed 55 pairs"), "{stdout}");
+
+    let file = hdf5_metno::File::open(&h5).unwrap();
+    let nx = file.dataset("grid/x").unwrap().shape()[0];
+    let ny = file.dataset("grid/y").unwrap().shape()[0];
+    // Default final window 64 px at 50 % overlap on 1920×1080.
+    assert_eq!((nx, ny), (59, 32));
+    assert_eq!(file.dataset("fields/u").unwrap().shape(), vec![55, ny, nx]);
+    assert!(file.dataset("fields/u_mps").is_ok());
+    let dt: f64 = file.attr("dt_s").unwrap().read_scalar().unwrap();
+    assert!((dt - 0.005).abs() < 1e-12);
+
+    let flags: ndarray::Array3<u8> = file.dataset("fields/flags").unwrap().read().unwrap();
+    let dx: ndarray::Array3<f32> = file.dataset("fields/dx").unwrap().read().unwrap();
+    let dy: ndarray::Array3<f32> = file.dataset("fields/dy").unwrap().read().unwrap();
+    let seeded = flags.iter().filter(|&&f| f & 1 == 0).count();
+    let valid = flags.iter().filter(|&&f| f & 23 == 0).count();
+    // This fog footage is hard (thin, low-texture regions, out-of-plane motion): ~45 % of
+    // seeded vectors pass validation here. Guard against regressions well below that.
+    assert!(
+        seeded > 0 && valid * 10 > seeded * 3,
+        "valid {valid} of {seeded} seeded vectors"
+    );
+    // Valid displacements stay within what the 96 px first pass can measure, and typical
+    // motion over 5 ms is a few px (the plume falls at up to ~3 px/ms early in the clip).
+    let mut mags: Vec<f32> = flags
+        .iter()
+        .zip(&dx)
+        .zip(&dy)
+        .filter(|((f, _), _)| *f & 23 == 0)
+        .map(|((_, u), v)| u.hypot(*v))
+        .collect();
+    mags.sort_by(f32::total_cmp);
+    let (median, max) = (mags[mags.len() / 2], *mags.last().unwrap());
+    assert!(max <= 48.0, "max |d| {max}");
+    assert!((0.1..10.0).contains(&median), "median |d| {median}");
+
+    let pngs = std::fs::read_dir(dir.path().join("smoke_quiver"))
+        .unwrap()
+        .count();
+    assert_eq!(pngs, 55);
+    assert!(
+        dir.path()
+            .join("smoke_quiver.mp4")
+            .metadata()
+            .unwrap()
+            .len()
+            > 10_000
+    );
+}

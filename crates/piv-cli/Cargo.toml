@@ -1,0 +1,29 @@
+[package]
+name = "piv-cli"
+description = "Command-line planar image velocimetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "piv"
+path = "src/main.rs"
+
+[features]
+default = ["hdf5"]
+hdf5 = ["piv-io/hdf5"]
+
+[dependencies]
+piv-core.workspace = true
+piv-io.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+
+[dev-dependencies]
+hdf5-metno = "0.15"
+tempfile = "3"
+ndarray.workspace = true
