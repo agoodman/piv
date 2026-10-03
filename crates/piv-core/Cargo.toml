@@ -1,0 +1,22 @@
+[package]
+name = "piv-core"
+description = "Planar image velocimetry algorithms: FFT cross-correlation, multi-pass interrogation, validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ndarray.workspace = true
+rayon.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+realfft = "3.5"
+rustfft = "6.4"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "pair"
+harness = false
