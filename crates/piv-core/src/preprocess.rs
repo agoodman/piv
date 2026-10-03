@@ -10,8 +10,9 @@ pub struct PreprocessConfig {
     /// Gaussian smoothing sigma in pixels (0 disables). Suppresses sensor noise.
     pub smooth_sigma: f32,
     /// Half-size of the box used for local mean/std normalization (0 disables). Evens out
-    /// brightness variation across the light sheet and, with a small radius, acts as a
-    /// high-pass filter that sharpens smooth fog texture for correlation.
+    /// brightness variation across the light sheet. Off by default: on real dry-ice fog
+    /// footage a small radius amplified noise in low-contrast areas and made results much
+    /// worse, although it helps on synthetic smooth texture.
     pub normalize_radius: usize,
     /// Added to the local std before dividing, so dark noisy regions are not amplified.
     pub normalize_eps: f32,

@@ -113,7 +113,7 @@ fn hdf5_round_trip() {
     let json: hdf5_metno::types::VarLenUnicode =
         file.attr("run_json").unwrap().read_scalar().unwrap();
     let v: serde_json::Value = serde_json::from_str(json.as_str()).unwrap();
-    assert_eq!(v["piv"]["windows"], serde_json::json!([64, 32]));
+    assert_eq!(v["piv"]["windows"], serde_json::json!([96, 64]));
 }
 
 #[test]

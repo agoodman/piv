@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::correlate::CorrelationPlan;
 use crate::field::{VectorField, flags};
 use crate::preprocess::PreparedFrame;
-use crate::validate::{ValidationConfig, ValidationSummary, validate};
+use crate::validate::{Limits, ValidationConfig, ValidationSummary, validate};
 use crate::{Grid, PivError};
 
 /// Thresholds on the (background-subtracted) raw intensity of a window, below which it is
@@ -38,7 +38,8 @@ impl Default for MaskConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PivConfig {
-    /// Window size for each pass, largest first, e.g. `[64, 32]`. Each must be even.
+    /// Window size for each pass, largest first. Each must be even. The default `[96, 64]`
+    /// suits smooth fog texture; sparse particle images resolve well with `[64, 32]`.
     pub windows: Vec<usize>,
     /// Fractional overlap between neighbouring windows, in `[0, 1)`.
     pub overlap: f32,
@@ -52,7 +53,7 @@ pub struct PivConfig {
 impl Default for PivConfig {
     fn default() -> Self {
         Self {
-            windows: vec![64, 32],
+            windows: vec![96, 64],
             overlap: 0.5,
             final_iterations: 2,
             mask: MaskConfig::default(),
@@ -140,7 +141,10 @@ impl PivAnalyzer {
         for win in passes {
             let grid = Grid::new(h, w, win, self.cfg.overlap)?;
             let mut field = self.pass(a, b, &grid, result.as_ref().map(|r| &r.field));
-            let summary = validate(&mut field, &self.cfg.validation);
+            let limits = Limits {
+                max_displacement: self.cfg.windows[0] as f32 / 2.0,
+            };
+            let summary = validate(&mut field, &self.cfg.validation, limits);
             result = Some(PairResult { field, summary });
         }
         Ok(result.expect("at least one pass"))
@@ -172,10 +176,14 @@ impl PivAnalyzer {
                         p.sample(grid.center_x(ix), grid.center_y(iy))
                     });
                     // Split the predicted shift symmetrically between the two windows so the
-                    // vector stays located at the window centre.
+                    // vector stays located at the window centre. Near the border, move both
+                    // windows inward together rather than shrinking the offset, so the
+                    // iteration can still converge there.
                     let place = |origin: usize, shift: f32, max: f32| {
-                        let a0 = (origin as f32 - shift / 2.0).clamp(0.0, max);
-                        (a0, (a0 + shift).clamp(0.0, max))
+                        let shift = shift.clamp(-max, max);
+                        let a0 = (origin as f32 - shift / 2.0)
+                            .clamp((-shift).max(0.0), (max - shift).min(max));
+                        (a0, a0 + shift)
                     };
                     let (ax, bx) = place(x, px, max_x);
                     let (ay, by) = place(y, py, max_y);

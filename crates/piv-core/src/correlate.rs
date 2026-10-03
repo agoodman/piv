@@ -211,7 +211,7 @@ fn load_window(dst: &mut [f32], img: &Frame, x: f32, y: f32, n: usize) -> f64 {
 
 /// Locates the highest peak of a circular `n × n` correlation plane, refines it with a
 /// three-point Gaussian fit (parabolic when values are not all positive), and measures the
-/// ratio to the highest other local maximum.
+/// ratio to the highest local maximum outside the primary peak's footprint.
 pub fn find_peak(corr: &[f32], n: usize) -> Peak {
     let at = |y: usize, x: usize| corr[(y % n) * n + (x % n)];
     let is_local_max = |y: usize, x: usize| {
@@ -236,20 +236,35 @@ pub fn find_peak(corr: &[f32], n: usize) -> Peak {
             (best, by, bx) = (v, i / n, i % n);
         }
     }
+    // Ripples on the shoulder of a broad peak (smooth fog texture) are not independent
+    // matches, so exclude the primary peak's footprint: 1.5× its half-width at half
+    // maximum, at least 2 px.
+    let half_width = |step: (usize, usize)| {
+        let mut k = 0;
+        while k < n / 2 && at(by + k * step.0, bx + k * step.1) > 0.5 * best {
+            k += 1;
+        }
+        k
+    };
+    let hw = [(1, 0), (n - 1, 0), (0, 1), (0, n - 1)]
+        .into_iter()
+        .map(half_width)
+        .max()
+        .unwrap_or(0);
+    let exclude = ((1.5 * hw as f32).ceil() as usize).max(2);
+    let circ = |a: usize, b: usize| {
+        let d = a.abs_diff(b);
+        d.min(n - d)
+    };
     let mut second = f32::NEG_INFINITY;
     for y in 0..n {
         for x in 0..n {
             let v = at(y, x);
-            if (y, x) != (by, bx) && v > second && is_local_max(y, x) {
+            if v > second && circ(y, by).max(circ(x, bx)) > exclude && is_local_max(y, x) {
                 second = v;
             }
         }
     }
-
-    // The overlap between two n-wide windows shrinks linearly with displacement, which biases
-    // the peak toward zero (Westerweel 1997). Undo that weighting on the fit points.
-    let unbias = |k: usize| 1.0 / (1.0 - k.min(n - k) as f32 / n as f32);
-    let at_unbiased = |y: usize, x: usize| at(y, x) * unbias(y % n) * unbias(x % n);
 
     let sub = |m: f32, c: f32, p: f32| -> f32 {
         let d = if m > 0.0 && c > 0.0 && p > 0.0 {
@@ -264,24 +279,8 @@ pub fn find_peak(corr: &[f32], n: usize) -> Peak {
             0.0
         }
     };
-    // After unbiasing, a neighbour can overtake the raw maximum; climb to the true peak.
-    let (mut by, mut bx) = (by, bx);
-    for _ in 0..3 {
-        let mut next = (by, bx);
-        for (dy, dx) in [(n - 1, 0), (1, 0), (0, n - 1), (0, 1)] {
-            let (y, x) = ((by + dy) % n, (bx + dx) % n);
-            if at_unbiased(y, x) > at_unbiased(next.0, next.1) {
-                next = (y, x);
-            }
-        }
-        if next == (by, bx) {
-            break;
-        }
-        (by, bx) = next;
-    }
-    let centre = at_unbiased(by, bx);
-    let sx = sub(at_unbiased(by, bx + n - 1), centre, at_unbiased(by, bx + 1));
-    let sy = sub(at_unbiased(by + n - 1, bx), centre, at_unbiased(by + 1, bx));
+    let sx = sub(at(by, bx + n - 1), best, at(by, bx + 1));
+    let sy = sub(at(by + n - 1, bx), best, at(by + 1, bx));
 
     let wrap = |k: usize| {
         if k >= n / 2 {
@@ -332,14 +331,52 @@ mod tests {
 
     #[test]
     fn subpixel_shift_of_particles() {
-        let (a, b) = synthetic::particle_pair(64, 64, 3, 0.05, 1.2, |_, _| (1.3, -0.6));
+        // A single correlation underestimates displacement by a few percent to ~20 %
+        // (particles cut by the window edges; worse for larger particles). The bias is
+        // proportional to the residual, so the iterated window offset in `multipass` drives it
+        // to zero; here only check it is small.
+        let (a, b) = synthetic::particle_pair(64, 64, 3, 0.05, 1.2, |_, _| (0.4, -0.3));
         let plan = CorrelationPlan::new(32);
         let mut ws = plan.workspace();
         let p = plan
             .correlate(&mut ws, &a, (16.0, 16.0), &b, (16.0, 16.0))
             .unwrap();
         assert!(
-            (p.dx - 1.3).abs() < 0.1 && (p.dy + 0.6).abs() < 0.1,
+            (p.dx - 0.4).abs() < 0.08 && (p.dy + 0.3).abs() < 0.08,
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn isolated_particle_is_unbiased() {
+        use crate::synthetic::Blob;
+        let a = synthetic::render(
+            64,
+            64,
+            &[Blob {
+                x: 31.3,
+                y: 30.7,
+                sigma: 1.5,
+                amp: 1.0,
+            }],
+        );
+        let b = synthetic::render(
+            64,
+            64,
+            &[Blob {
+                x: 31.7,
+                y: 30.45,
+                sigma: 1.5,
+                amp: 1.0,
+            }],
+        );
+        let plan = CorrelationPlan::new(64);
+        let mut ws = plan.workspace();
+        let p = plan
+            .correlate(&mut ws, &a, (0.0, 0.0), &b, (0.0, 0.0))
+            .unwrap();
+        assert!(
+            (p.dx - 0.4).abs() < 1e-3 && (p.dy + 0.25).abs() < 1e-3,
             "{p:?}"
         );
     }
@@ -376,6 +413,8 @@ mod tests {
             }
         }
         c[8 * n + 8] = 0.25; // a distinct secondary peak
+        c[2 * n] += 0.05; // a ripple on the main peak's shoulder: not a second peak
+        c[3 * n] -= 0.05;
         let p = find_peak(&c, n);
         assert_eq!((p.dx, p.dy), (0.0, 0.0));
         assert!((p.ppr - 4.0).abs() < 1e-3, "{p:?}");

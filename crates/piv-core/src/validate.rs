@@ -10,10 +10,19 @@ pub struct ValidationConfig {
     pub ppr_threshold: f32,
     /// Normalized median test threshold (Westerweel & Scarano 2005 recommend 2).
     pub median_threshold: f32,
-    /// Normalized median test noise level ε, in pixels.
+    /// Normalized median test noise level ε, in pixels. 0.1 is the textbook value for particle
+    /// images; 0.3 rejected fewer good vectors on dry-ice fog without admitting worse ones.
     pub median_eps: f32,
     /// Replace rejected vectors with the median of valid neighbours.
     pub replace: bool,
+}
+
+/// Limits that depend on the interrogation setup rather than on the user's tolerances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limits {
+    /// Largest displacement magnitude (px) the analysis can measure; larger is flagged
+    /// `OUT_OF_RANGE`. Half the first-pass window: beyond that the correlation peak aliases.
+    pub max_displacement: f32,
 }
 
 impl Default for ValidationConfig {
@@ -32,20 +41,37 @@ pub struct ValidationSummary {
     pub no_signal: usize,
     pub low_ppr: usize,
     pub median_outliers: usize,
+    pub out_of_range: usize,
     pub replaced: usize,
 }
 
 /// Flags low-confidence vectors and outliers in place and (optionally) replaces them.
 ///
 /// `NO_SIGNAL` vectors are left as NaN: they are missing data, not errors.
-pub fn validate(field: &mut VectorField, cfg: &ValidationConfig) -> ValidationSummary {
+pub fn validate(
+    field: &mut VectorField,
+    cfg: &ValidationConfig,
+    limits: Limits,
+) -> ValidationSummary {
     let (ny, nx) = field.dx.dim();
     let mut summary = ValidationSummary::default();
 
-    for (f, &ppr) in field.flags.iter_mut().zip(field.peak_ratio.iter()) {
+    for (((f, &ppr), &u), &v) in field
+        .flags
+        .iter_mut()
+        .zip(&field.peak_ratio)
+        .zip(&field.dx)
+        .zip(&field.dy)
+    {
         if *f & flags::NO_SIGNAL != 0 {
             summary.no_signal += 1;
-        } else if ppr < cfg.ppr_threshold {
+            continue;
+        }
+        if u.hypot(v) > limits.max_displacement {
+            *f |= flags::OUT_OF_RANGE;
+            summary.out_of_range += 1;
+        }
+        if ppr < cfg.ppr_threshold {
             *f |= flags::LOW_PPR;
             summary.low_ppr += 1;
         }
@@ -61,7 +87,7 @@ pub fn validate(field: &mut VectorField, cfg: &ValidationConfig) -> ValidationSu
                 continue;
             }
             collect_neighbours(field, &snapshot, usable, ix, iy, 1, &mut nu, &mut nv);
-            if nu.len() < 3 {
+            if nu.len() < 2 {
                 continue;
             }
             let ru = residual(field.dx[[iy, ix]], &mut nu, cfg.median_eps);
@@ -170,7 +196,7 @@ mod tests {
             f.dx[[iy, ix]] = 9.0;
             f.dy[[iy, ix]] = 4.0;
         }
-        let s = validate(&mut f, &ValidationConfig::default());
+        let s = validate(&mut f, &ValidationConfig::default(), NO_LIMIT);
         assert_eq!(s.median_outliers, outliers.len(), "{s:?}");
         assert_eq!(s.replaced, outliers.len());
         for &(iy, ix) in &outliers {
@@ -187,11 +213,32 @@ mod tests {
         f.flags[[0, 0]] = flags::NO_SIGNAL;
         f.dx[[0, 0]] = f32::NAN;
         f.dy[[0, 0]] = f32::NAN;
-        let s = validate(&mut f, &ValidationConfig::default());
+        let s = validate(&mut f, &ValidationConfig::default(), NO_LIMIT);
         assert_eq!((s.low_ppr, s.no_signal, s.median_outliers), (1, 1, 0));
         assert_eq!(f.flags[[4, 4]], flags::LOW_PPR | flags::REPLACED);
         assert_eq!(f.flags[[0, 0]], flags::NO_SIGNAL);
         assert!(f.dx[[0, 0]].is_nan());
+    }
+
+    const NO_LIMIT: Limits = Limits {
+        max_displacement: f32::INFINITY,
+    };
+
+    #[test]
+    fn out_of_range_vectors_are_flagged_and_replaced() {
+        let mut f = uniform_field(1.0, 0.5);
+        f.dx[[3, 3]] = 40.0;
+        let s = validate(
+            &mut f,
+            &ValidationConfig::default(),
+            Limits {
+                max_displacement: 32.0,
+            },
+        );
+        assert_eq!(s.out_of_range, 1);
+        assert_eq!(f.flags[[3, 3]] & flags::OUT_OF_RANGE, flags::OUT_OF_RANGE);
+        assert_eq!(f.flags[[3, 3]] & flags::REPLACED, flags::REPLACED);
+        assert_eq!(f.dx[[3, 3]], 1.0);
     }
 
     #[test]

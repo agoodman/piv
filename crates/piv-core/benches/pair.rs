@@ -13,10 +13,17 @@ fn full_hd_pair(c: &mut Criterion) {
         PreparedFrame::new(&a, &pre, None),
         PreparedFrame::new(&b, &pre, None),
     );
-    let analyzer = PivAnalyzer::new(PivConfig::default()).unwrap(); // 64 → 32 px, 50 % overlap
-    c.bench_function("analyze 1920x1080 pair (64,32 / 50%)", |bench| {
-        bench.iter(|| analyzer.analyze(&pa, &pb).unwrap())
-    });
+    for windows in [vec![96, 64], vec![64, 32]] {
+        let name = format!("analyze 1920x1080 pair ({windows:?}, 50% overlap)");
+        let analyzer = PivAnalyzer::new(PivConfig {
+            windows,
+            ..Default::default()
+        })
+        .unwrap();
+        c.bench_function(&name, |bench| {
+            bench.iter(|| analyzer.analyze(&pa, &pb).unwrap())
+        });
+    }
 }
 
 criterion_group! {

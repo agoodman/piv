@@ -275,7 +275,7 @@ pub mod hdf5_out {
                 .new_attr::<VarLenUnicode>()
                 .create("bits")?
                 .write_scalar(
-                    &"1=NO_SIGNAL 2=LOW_PPR 4=MEDIAN_OUTLIER 8=REPLACED"
+                    &"1=NO_SIGNAL 2=LOW_PPR 4=MEDIAN_OUTLIER 8=REPLACED 16=OUT_OF_RANGE"
                         .parse::<VarLenUnicode>()
                         .unwrap(),
                 )?;

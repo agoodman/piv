@@ -12,9 +12,11 @@ pub mod flags {
     pub const MEDIAN_OUTLIER: u8 = 1 << 2;
     /// Value was replaced by the median of valid neighbours.
     pub const REPLACED: u8 = 1 << 3;
+    /// Displacement larger than the first-pass window can measure.
+    pub const OUT_OF_RANGE: u8 = 1 << 4;
 
     /// Vectors with any of these flags are not trustworthy measurements.
-    pub const INVALID: u8 = NO_SIGNAL | LOW_PPR | MEDIAN_OUTLIER;
+    pub const INVALID: u8 = NO_SIGNAL | LOW_PPR | MEDIAN_OUTLIER | OUT_OF_RANGE;
 }
 
 /// Displacement field for one image pair, in pixels, sampled on a [`Grid`].

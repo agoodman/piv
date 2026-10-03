@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use image::{Rgb, RgbImage};
+use image::Rgb;
+pub use image::RgbImage;
 use imageproc::drawing::draw_antialiased_line_segment_mut;
 use imageproc::pixelops::interpolate;
 use piv_core::{Frame, VectorField, flags};
@@ -24,8 +25,9 @@ pub struct QuiverStyle {
 }
 
 impl QuiverStyle {
-    /// Scales arrows so the 95th-percentile vector spans ~90 % of the grid spacing, and
-    /// stretches the background so its 99th percentile is near white.
+    /// Scales arrows so a typical moving vector (75th percentile) spans ~60 % of the grid
+    /// spacing, colours up to the 95th percentile, and stretches the background so its 99th
+    /// percentile is near white.
     pub fn auto(raw: &Frame, field: &VectorField) -> Self {
         let mut mags: Vec<f32> = field
             .dx
@@ -36,15 +38,18 @@ impl QuiverStyle {
             .map(|((u, v), _)| u.hypot(*v))
             .filter(|m| m.is_finite())
             .collect();
+        let m75 = percentile(&mut mags, 0.75)
+            .filter(|&m| m > 0.1)
+            .unwrap_or(1.0);
         let m95 = percentile(&mut mags, 0.95)
-            .filter(|&m| m > 1e-3)
+            .filter(|&m| m > 0.1)
             .unwrap_or(1.0);
         let mut px: Vec<f32> = raw.iter().step_by(7).copied().collect();
         let p99 = percentile(&mut px, 0.99)
             .filter(|&p| p > 1e-3)
             .unwrap_or(1.0);
         Self {
-            arrow_scale: 0.9 * field.grid.step as f32 / m95,
+            arrow_scale: 0.6 * field.grid.step as f32 / m75,
             color_max: m95,
             gain: (0.9 / p99).clamp(1.0, 20.0),
             every: 1,
@@ -193,7 +198,7 @@ mod tests {
         f.dx[[1, 1]] = f32::NAN; // missing: not drawn
         f.flags[[1, 1]] = flags::NO_SIGNAL;
         let style = QuiverStyle::auto(&raw, &f);
-        assert!((style.arrow_scale - 0.9 * 32.0 / 4.0).abs() < 1e-4);
+        assert!((style.arrow_scale - 0.6 * 32.0 / 4.0).abs() < 1e-4);
         // Short arrows so each stays inside its own cell.
         let style = QuiverStyle {
             arrow_scale: 2.0,
