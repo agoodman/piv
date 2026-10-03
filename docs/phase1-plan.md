@@ -68,7 +68,7 @@ docs/phase1-plan.md
 
 ### 5.1 Decoding (`piv-io::decode`)
 - A `FrameSource` trait with methods `next_frame() -> Option<(index, Frame)>`, `seek(index)`, and `len()`.
-- First implementation: **`ffmpeg-sidecar`**. It streams raw `gray` (the Y/luma plane), so we skip RGB conversion; luma is ~59 % green-weighted, which suits 532 nm light. A `--channel green` option uses `format=gbrp,extractplanes=g` instead.
+- First implementation: an `ffmpeg` subprocess (*as built: spawned directly rather than through `ffmpeg-sidecar`, see §13*). It streams raw `gray` (the Y/luma plane), so we skip RGB conversion; luma is ~59 % green-weighted, which suits 532 nm light. A `--channel green` option uses `format=gbrp,extractplanes=g` instead.
 - **Bit depth:** 8-bit sources are decoded as `gray`. Sources with more than 8 bits, such as the iPhone's 10-bit HEVC (and Dolby Vision HDR when that is on), are decoded as `gray16le`. Either way, frames become `f32` normalized to 0–1, so the core never sees bit depth.
   - HDR transfer curves (HLG/PQ) are left un-linearized in phase 1. Brightness doesn't need to be exact here, because correlation only cares that features move together. `piv info` reports the curve.
 - A sliding ring buffer of `stride + 1` frames, so memory stays constant for arbitrarily long clips.
@@ -91,22 +91,22 @@ Then `dt = stride / capture_fps` and `velocity_px_per_s = displacement_px / dt`.
 **Choosing the stride for different frame rates.** Good correlation needs a displacement of roughly 2–8 px in the image plane. Particles must also stay inside the light sheet between the two frames, which means out-of-plane motion must be less than about ¼ of the sheet thickness. With a ~1 mm sheet, that limits out-of-plane speed to about 0.25 m/s at stride 1 and 1000 fps, or about 0.06 m/s at 240 fps. `piv analyze` prints the in-plane displacement statistics for each run, so you can tune `--stride`: increase it when motion is sub-pixel, and decrease it when there are many outliers or few valid vectors.
 
 ### 5.3 Preprocessing (`piv-core::preprocess`)
-- Optional background subtraction: a rolling temporal minimum or mean over N frames removes static glare, such as the bright band in the lower right.
-- Local intensity normalization (subtract the local mean and divide by the local std over a sliding window). This matters for fog, where brightness varies a lot across the sheet.
+- Optional background subtraction: a temporal minimum or mean over N frames removes static glare, such as the bright band in the lower right (*as built: a static background from frames sampled across the whole clip, see §13*).
+- Local intensity normalization (subtract the local mean and divide by the local std over a sliding window). This matters for fog, where brightness varies a lot across the sheet (*as built: off by default, because it hurt on real footage; see §13*).
 - Signal mask: windows whose std or mean falls below a threshold are marked `NO_SIGNAL` and not correlated.
 
 ### 5.4 Cross-correlation (`piv-core::correlate`, `multipass`)
 - Standard FFT cross-correlation of zero-mean windows, normalized so peak heights can be compared.
-- **Multi-pass with integer window offset:** pass 1 uses large windows (default 64 px), and later passes (default down to 32 px, 50 % overlap) shift the second window by the rounded predictor from the previous pass. This handles displacements larger than ¼ of the window.
+- **Multi-pass with integer window offset** (*as built: continuous sub-pixel offset, default 96 → 64 px; see §13*): pass 1 uses large windows (default 64 px), and later passes (default down to 32 px, 50 % overlap) shift the second window by the rounded predictor from the previous pass. This handles displacements larger than ¼ of the window.
 - 3-point Gaussian sub-pixel peak fit, falling back to parabolic fit when values are ≤ 0.
 - Per-vector quality: primary-to-secondary peak ratio (PPR).
 - Parallelism: rayon over windows, one FFT plan cache per thread, and real-to-complex FFTs (`realfft`).
 - *Deferred to phase 2:* continuous window deformation (WIDIM), which matters for the strongly sheared vortices visible in this clip.
 
 ### 5.5 Validation (`piv-core::validate`)
-- Normalized median test (Westerweel & Scarano 2005: 3×3 neighbourhood, ε = 0.1 px, threshold 2).
+- Normalized median test (Westerweel & Scarano 2005: 3×3 neighbourhood, ε = 0.1 px, threshold 2) (*as built: ε = 0.3 by default; see §13*).
 - PPR threshold (default 1.3).
-- Invalid vectors are replaced by the median of valid neighbours and **flagged, not hidden**. The flags are a bitfield: `NO_SIGNAL`, `LOW_PPR`, `MEDIAN_OUTLIER`, `REPLACED`.
+- Invalid vectors are replaced by the median of valid neighbours and **flagged, not hidden**. The flags are a bitfield: `NO_SIGNAL`, `LOW_PPR`, `MEDIAN_OUTLIER`, `REPLACED` (*as built: plus `OUT_OF_RANGE`*).
 
 ### 5.6 Output (`piv-io::write`, `render`)
 - **HDF5 (default), one file per run, written with `hdf5-metno` against the system libhdf5:**
@@ -216,3 +216,35 @@ piv analyze clips/C0141.MP4 -o out/run1.h5 \
 
 ## 12. Remaining open questions
 None blocking. When an iPhone 17 Pro clip is available, add it to `clips/` and we'll confirm the timing behaviour and add a fixture.
+
+## 13. As built: changes from the plan and findings on C0141
+
+All three crates, the `piv info` / `piv analyze` CLI, HDF5 and NPZ output, and quiver PNG and MP4 output are implemented. 49 tests pass (5 of them need the clip and are `#[ignore]`d by default), and `cargo clippy -D warnings` is clean.
+
+### Changes from the plan, and why
+| Planned | Built | Reason |
+|---|---|---|
+| `ffmpeg-sidecar` crate | `ffmpeg` spawned directly | Same approach with one fewer dependency; frame-accurate seeking is verified against sequential decoding on C0141. |
+| Integer window offset | Continuous (bilinear, sub-pixel) offset, final window run twice (`final_iterations = 2`) | A single correlation underestimates displacement by 7–20 % (particles cut at window edges, worse for larger blobs). Because that bias is proportional to the residual, iterating a sub-pixel offset drives it to ~0. An overlap-weight bias correction was tried and then removed, because it walked the peak along the broad correlation ridges that fog produces. |
+| Peak ratio vs. any other local maximum | Secondary peak searched outside 1.5× the primary's half-width | On fog, ripples on the shoulder of a broad peak counted as "second peaks", which flagged most vectors `LOW_PPR`. |
+| Windows 64 → 32 | **96 → 64** (`--window 64,32` is still available) | On C0141, 32 px windows roughly doubled the frame-to-frame jitter in dense fog (≈1.1 vs ≈0.57 px at stride 5). |
+| Local normalization on | **Off** (`--normalize-radius`) | On synthetic smooth texture it helped, but on real fog a small radius amplified noise and raised jitter 4–20×. |
+| Median test ε = 0.1 | **ε = 0.3** | Rejected 19 % instead of 28 % of seeded vectors, with unchanged quality among accepted vectors and a sharper split for rejected ones. |
+| Rolling background | Static min (or mean) of 40 frames sampled across the **whole clip** | Fog moves only ~1 px/ms, so a short-range minimum also removes the fog itself. |
+| Mask thresholds unset | `--min-mean 0.04 --min-std 0.015` | Measured: dark windows have mean ≈ 0.007 and std ≈ 0.010; fog windows have mean ≈ 0.2–0.4. |
+| – | `OUT_OF_RANGE` flag (16): \|d\| > half the first window | Stops physically unmeasurable vectors from being reported as valid. |
+| iPhone capture-rate probe | Not implemented | No sample footage. iPhone files fall back to the container rate with a warning. |
+
+### Findings on C0141
+- **The flow is slow relative to the frame rate.** Most fog moves under 1 px/ms. The falling plume early in the clip reaches ~3 px/ms (≈0.7 m/s with the upper-bound FOV scale). **`--stride 5` (dt = 5 ms)** is a good default for this clip.
+- **Accuracy is limited by the fog, not by the code.** The Rust correlator matches an independent numpy FFT correlation at the same window size. In densely seeded regions, the jitter between successive pairs grows with stride (≈0.4 px at stride 2, ≈1 px at stride 10). This means the fog pattern itself deforms and moves through the sheet over time; pixel noise is not the limit.
+- **Validity:** over the whole clip at stride 5, about 72 % of windows have no seeding (dark), and about half of the seeded vectors are rejected. These are mostly in thin, low-texture fog at plume edges.
+- **Performance (Apple M5 Max):**
+  - 15 ms per 1920×1080 pair at 96 → 64 px and 5.8 ms to prepare a frame.
+  - The full clip (3715 pairs at stride 5) runs at 68 pairs/s, about 55 s, writing a 42 MB HDF5 file.
+  - With quiver PNGs and an MP4 it runs at 58 pairs/s.
+
+### Suggested phase 2 priorities
+1. Window deformation (WIDIM), for the strongly sheared vortex edges where most rejections happen.
+2. Ensemble correlation or temporal filtering across pairs, to reduce the jitter from the deforming fog.
+3. Target-based calibration (§10), and an iPhone capture-rate probe once footage exists.
