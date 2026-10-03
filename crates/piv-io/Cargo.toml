@@ -1,0 +1,26 @@
+[package]
+name = "piv-io"
+description = "Video decoding, capture-rate metadata, scale, and vector-field output for piv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["hdf5"]
+hdf5 = ["dep:hdf5-metno"]
+
+[dependencies]
+piv-core.workspace = true
+anyhow.workspace = true
+ndarray.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hdf5-metno = { version = "0.15", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
+ndarray-npy = { version = "0.10", default-features = false, features = ["compressed_npz"] }
+
+[dev-dependencies]
+tempfile = "3"
