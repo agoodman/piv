@@ -194,7 +194,11 @@ pub mod hdf5_out {
         t: Dataset,
     }
 
-    fn stack<T: H5Type>(g: &Group, name: &str, (ny, nx): (usize, usize)) -> Result<Dataset> {
+    pub(crate) fn stack<T: H5Type>(
+        g: &Group,
+        name: &str,
+        (ny, nx): (usize, usize),
+    ) -> Result<Dataset> {
         g.new_dataset::<T>()
             .shape(Extents::new(vec![
                 Extent::resizable(0),
@@ -208,7 +212,7 @@ pub mod hdf5_out {
             .with_context(|| format!("creating dataset {name}"))
     }
 
-    fn series<T: H5Type>(g: &Group, name: &str) -> Result<Dataset> {
+    pub(crate) fn series<T: H5Type>(g: &Group, name: &str) -> Result<Dataset> {
         g.new_dataset::<T>()
             .shape(Extents::new(vec![Extent::resizable(0)]))
             .chunk(1024)
@@ -216,8 +220,9 @@ pub mod hdf5_out {
             .with_context(|| format!("creating dataset {name}"))
     }
 
-    fn write_attrs(loc: &Location, meta: &RunMetadata) -> Result<()> {
-        let json = serde_json::to_value(meta)?;
+    /// Writes `json` as a pretty-printed string attribute `json_name`, plus each top-level
+    /// field as its own attribute (numbers, strings and bools natively; nested values as JSON).
+    pub fn write_attrs(loc: &Location, json: &Value, json_name: &str) -> Result<()> {
         let str_attr = |name: &str, s: &str| -> Result<()> {
             let v: VarLenUnicode = s
                 .parse()
@@ -227,7 +232,7 @@ pub mod hdf5_out {
                 .write_scalar(&v)?;
             Ok(())
         };
-        str_attr("run_json", &serde_json::to_string_pretty(&json)?)?;
+        str_attr(json_name, &serde_json::to_string_pretty(json)?)?;
         for (k, v) in json.as_object().expect("struct serializes to an object") {
             match v {
                 Value::Null => {}
@@ -253,7 +258,7 @@ pub mod hdf5_out {
             }
             let file =
                 File::create(path).with_context(|| format!("creating {}", path.display()))?;
-            write_attrs(&file, meta)?;
+            write_attrs(&file, &serde_json::to_value(meta)?, "run_json")?;
 
             let shape = first.dx.dim();
             let grid = file.create_group("grid")?;

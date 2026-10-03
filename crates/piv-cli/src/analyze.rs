@@ -18,6 +18,8 @@ use piv_io::render::{QuiverStyle, encode_video, render_quiver};
 use piv_io::write::{FieldWriter, OutputFormat, PairRecord, RunMetadata, create_writer};
 use piv_io::{Channel, FovAxis, MediaInfo, Roi, ScaleSpec, probe, resolve_capture_rate};
 
+use crate::png::PngSink;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ChannelArg {
     Luma,
@@ -385,17 +387,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         }
     });
 
-    // PNG encoding is slow relative to correlation; do it on its own thread.
-    let (png_tx, png_rx) = mpsc::sync_channel::<(PathBuf, piv_io::render::RgbImage)>(8);
-    let png_writer = thread::spawn(move || -> Result<usize> {
-        let mut n = 0;
-        for (path, img) in png_rx {
-            img.save(&path)
-                .with_context(|| format!("writing {}", path.display()))?;
-            n += 1;
-        }
-        Ok(n)
-    });
+    let pngs = quiver.then(PngSink::spawn);
 
     let is_a = |f: usize| f >= start && f + args.stride < end && (f - start) % args.pair_step == 0;
     let is_b = |f: usize| f >= start + args.stride && is_a(f - args.stride);
@@ -482,9 +474,9 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
                     }
                 });
                 let img = render_quiver(raw_a, field, &s);
-                png_tx
-                    .send((quiver_dir.join(format!("quiver_f{a_idx:06}.png")), img))
-                    .ok();
+                if let Some(p) = &pngs {
+                    p.send(quiver_dir.join(format!("quiver_f{a_idx:06}.png")), img);
+                }
             }
         }
         // Drop frames no later pair needs.
@@ -509,10 +501,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("decoder thread panicked"))?;
     ensure!(decoded_ok.is_some(), "decoding stopped early");
-    drop(png_tx);
-    let pngs = png_writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("PNG writer panicked"))??;
+    let pngs = pngs.map(PngSink::finish).transpose()?.unwrap_or(0);
     match writer {
         Some(w) => w.finish()?,
         None => bail!("no frame pairs were analysed"),

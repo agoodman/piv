@@ -4,9 +4,11 @@
 //!
 //! 1. [`preprocess::PreparedFrame`]: optional background subtraction, Gaussian smoothing and
 //!    local contrast normalization, plus integral images used for signal masking.
-//! 2. [`multipass::PivAnalyzer`]: multi-pass FFT cross-correlation with integer window offset
-//!    and Gaussian sub-pixel peak fitting.
+//! 2. [`multipass::PivAnalyzer`]: multi-pass FFT cross-correlation with continuous (sub-pixel)
+//!    window offset and Gaussian sub-pixel peak fitting.
 //! 3. [`validate`]: peak-ratio and normalized-median tests, replacement of outliers.
+//!
+//! [`smooth`] post-processes a time series of fields (temporal and spatial filtering).
 //!
 //! All displacements are in pixels; converting to velocity is a matter of dividing by the
 //! frame separation from [`frame::FrameRate::dt`].
@@ -20,6 +22,7 @@ pub mod frame;
 pub mod grid;
 pub mod multipass;
 pub mod preprocess;
+pub mod smooth;
 pub mod synthetic;
 pub mod validate;
 

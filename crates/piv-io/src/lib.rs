@@ -4,6 +4,8 @@
 pub mod decode;
 pub mod metadata;
 pub mod render;
+#[cfg(feature = "hdf5")]
+pub mod run_file;
 pub mod scale;
 pub mod write;
 

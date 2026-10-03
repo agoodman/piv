@@ -82,6 +82,37 @@ with h5py.File("out/run1.h5") as f:
     print(f.attrs["capture_fps"], f.attrs["dt_s"], np.nanmedian(np.hypot(u, v)[good]))
 ```
 
+### Smoothing
+
+`piv smooth` post-processes an HDF5 run without re-running the correlation:
+
+```sh
+# Compare settings: cross-validation error, coverage, peak flattening, jitter.
+piv smooth out/run1.h5 --sweep
+
+# 9-pair temporal median (≈9 ms at 1000 fps), plus a side-by-side raw | smoothed video.
+piv smooth out/run1.h5 -o out/run1_t9.h5 --temporal 9 --video
+```
+
+| Option | Meaning |
+|---|---|
+| `--temporal N` | moving filter over N consecutive pairs (odd) at each grid point |
+| `--temporal-kernel median\|mean` | median (default) resists leftover outliers; mean removes slightly more noise |
+| `--spatial σ` | Gaussian low-pass, σ in grid cells, skipping missing vectors |
+| `--min-support N` | raw vectors needed in the temporal window (default N/3) |
+
+Only accepted raw vectors contribute, and outputs are produced only where the window had
+seeding in that pair. The output has the same layout as `piv analyze` (`fields/u`, …) with
+smoothed values, plus `fields/support` (contributing vectors) and the untouched raw fields under
+`raw/`; the settings are in the `smoothing_json` attribute.
+
+The sweep's **CV error** predicts each accepted raw vector from neighbours that share no data
+with it (overlapping windows and pairs sharing a frame are left out) and reports the median
+miss. Lower is better, and it cannot go below the raw measurement noise. On the sample clips,
+temporal smoothing beats spatial: temporal 9–25 reaches ≈0.30–0.35 px, while any spatial
+smoothing scores worse than temporal alone, because the fog field really varies from one grid
+cell to the next.
+
 ## Layout
 
 - `crates/piv-core`: algorithms with no I/O (FFT correlation, multi-pass, validation, preprocessing, synthetic images)

@@ -22,6 +22,7 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap = { version = "4.6", features = ["derive"] }
+ndarray.workspace = true
 
 [dev-dependencies]
 hdf5-metno = "0.15"

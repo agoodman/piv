@@ -2,6 +2,9 @@
 
 mod analyze;
 mod info;
+mod png;
+#[cfg(feature = "hdf5")]
+mod smooth;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,6 +37,9 @@ enum Cmd {
     },
     /// Compute displacement and velocity fields for frame pairs.
     Analyze(Box<analyze::AnalyzeArgs>),
+    /// Temporal and/or spatial smoothing of an analysed run (HDF5).
+    #[cfg(feature = "hdf5")]
+    Smooth(Box<smooth::SmoothArgs>),
 }
 
 fn main() -> ExitCode {
@@ -45,6 +51,8 @@ fn main() -> ExitCode {
             json,
         } => info::run(&input, capture_fps, json),
         Cmd::Analyze(args) => analyze::run(*args),
+        #[cfg(feature = "hdf5")]
+        Cmd::Smooth(args) => smooth::run(*args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

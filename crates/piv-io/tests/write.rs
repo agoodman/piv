@@ -177,3 +177,66 @@ fn npz_writes_pairs_and_run_json() {
     let dx: ndarray::Array2<f32> = npz.by_name("dx").unwrap();
     assert_eq!(dx[[1, 1]], 1.5);
 }
+
+#[test]
+fn smoothed_round_trip_keeps_raw_and_metadata() {
+    use piv_io::run_file::{SmoothedFields, read_run, write_smoothed};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.h5");
+    let fields = [field(1.0), field(2.0)];
+    let mut w = create_writer(OutputFormat::Hdf5, &path, &meta(true), &fields[0]).unwrap();
+    for (i, f) in fields.iter().enumerate() {
+        w.write(&PairRecord {
+            frame_a: 10 + i,
+            frame_b: 12 + i,
+            time_s: 0.0,
+            field: f,
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    let run = read_run(&path).unwrap();
+    assert_eq!(run.len(), 2);
+    assert_eq!(run.dt().unwrap(), 0.002);
+    assert!(run.m_per_px().is_some());
+
+    let dx = run.dx.mapv(|v| v * 0.5);
+    let support = run.dx.mapv(|v| if v.is_finite() { 3u16 } else { 0 });
+    let out = dir.path().join("smooth.h5");
+    let settings = serde_json::json!({ "smooth_temporal_window": 3 });
+    write_smoothed(
+        &out,
+        &run,
+        &SmoothedFields {
+            dx: &dx,
+            dy: &run.dy,
+            support: &support,
+            settings,
+        },
+    )
+    .unwrap();
+
+    let f = hdf5_metno::File::open(&out).unwrap();
+    let u: ndarray::Array3<f32> = f.dataset("fields/u").unwrap().read().unwrap();
+    assert!(
+        (u[[1, 1, 1]] - 1.5 / 0.002).abs() < 1e-2,
+        "smoothed dx 1.5 over 2 ms"
+    );
+    let raw: ndarray::Array3<f32> = f.dataset("raw/dx").unwrap().read().unwrap();
+    assert_eq!(raw[[1, 1, 1]], 3.0);
+    let flags: ndarray::Array3<u8> = f.dataset("fields/flags").unwrap().read().unwrap();
+    assert_eq!(flags[[0, 0, 0]], flags::NO_SIGNAL);
+    assert!(f.dataset("fields/u_mps").is_ok() && f.dataset("fields/support").is_ok());
+    let w: u64 = f
+        .attr("smooth_temporal_window")
+        .unwrap()
+        .read_scalar()
+        .unwrap();
+    assert_eq!(w, 3);
+    let fps: f64 = f.attr("capture_fps").unwrap().read_scalar().unwrap();
+    assert_eq!(fps, 1000.0);
+
+    // Smoothing a smoothed file is refused.
+    assert!(read_run(&out).is_err());
+}

@@ -101,3 +101,71 @@ fn analyze_writes_hdf5_quiver_and_video() {
             > 10_000
     );
 }
+
+#[test]
+#[ignore = "needs clips/C0141.MP4"]
+fn smooth_sweep_and_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let h5 = dir.path().join("run.h5");
+    let piv = env!("CARGO_BIN_EXE_piv");
+    let ok = Command::new(piv)
+        .arg("analyze")
+        .arg(clip())
+        .arg("-o")
+        .arg(&h5)
+        .args(["--start", "1400", "--end", "1500", "--stride", "5"])
+        .status()
+        .unwrap();
+    assert!(ok.success());
+
+    let out = Command::new(piv)
+        .arg("smooth")
+        .arg(&h5)
+        .arg("--sweep")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("temporal median 9") && text.contains("lowest CV error"),
+        "{text}"
+    );
+
+    let sm = dir.path().join("smooth.h5");
+    let out = Command::new(piv)
+        .arg("smooth")
+        .arg(&h5)
+        .arg("-o")
+        .arg(&sm)
+        .args(["--temporal", "9", "--spatial", "1", "--video"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = hdf5_metno::File::open(&sm).unwrap();
+    let u: ndarray::Array3<f32> = file.dataset("fields/u").unwrap().read().unwrap();
+    let raw: ndarray::Array3<f32> = file.dataset("raw/dx").unwrap().read().unwrap();
+    assert_eq!(u.dim(), raw.dim());
+    assert!(
+        dir.path()
+            .join("smooth_compare.mp4")
+            .metadata()
+            .unwrap()
+            .len()
+            > 10_000
+    );
+
+    // Even window sizes are rejected.
+    let bad = Command::new(piv)
+        .arg("smooth")
+        .arg(&h5)
+        .arg("-o")
+        .arg(dir.path().join("x.h5"))
+        .args(["--temporal", "4"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+}
