@@ -2,7 +2,12 @@
 
 ## 1. Context
 
-We want a fast, command-line planar velocimetry library that reads high-speed footage of a 532 nm laser light sheet seeded with dry-ice fog. It should estimate how the image pattern moves between frames and use the true frame timing to turn that motion into a 2D velocity vector field. Phase 1 builds the core pipeline end to end: decode → preprocess → cross-correlate → validate → write vector fields and quiver overlays. Results are in **pixel units only** (px/frame, px/s). Physical calibration comes in a later phase.
+We want a fast, command-line planar velocimetry library that reads high-speed footage of a 532 nm laser light sheet seeded with dry-ice fog. It should estimate how the image pattern moves between frames and use the true frame timing to turn that motion into a 2D velocity vector field. Phase 1 builds the core pipeline end to end: decode → preprocess → cross-correlate → validate → write vector fields and quiver overlays. Results are always in pixel units (px/frame, px/s). If you supply a field of view and the camera-to-sheet distance, the tool also reports an approximate physical velocity (m/s); see §5.7. Proper target-based calibration comes in a later phase.
+
+Requirements confirmed after review:
+- **Any capture frame rate.** Cameras in use run at 1000 fps and 240 fps, but nothing assumes a particular rate.
+- **User-entered field of view.** The sample was shot at 84°. A light sheet of about 1 mm is recorded as run metadata.
+- **HDF5 is the default output format.**
 
 ## 2. What the sample clip tells us (`clips/C0141.MP4`)
 
@@ -50,7 +55,8 @@ crates/
   piv-io/
     src/decode.rs         FrameSource trait + FFmpeg-backed implementation
     src/metadata.rs       capture-fps discovery (Sony NRT XML, container, override)
-    src/write.rs          .npz writer (+ HDF5 behind `hdf5` cargo feature)
+    src/scale.rs          optional px → m scale from FOV + distance (§5.7)
+    src/write.rs          HDF5 writer (default) + .npz writer
     src/render.rs         quiver overlay PNGs; MP4 assembly via ffmpeg
   piv-cli/
     src/main.rs           `piv` binary (clap)
@@ -67,12 +73,16 @@ docs/phase1-plan.md
 - Using a trait means we can later swap in in-process `ffmpeg-next` decoding, or image-sequence input (TIFF/PNG folders from scientific cameras), without touching the core.
 
 ### 5.2 Timing (`piv-io::metadata`) — the main correctness risk
-Capture fps resolves in this order, and the chosen source is recorded in the output metadata:
-1. `--capture-fps <f>` CLI override.
-2. Sony `NonRealTimeMeta` XML (`VideoFrame@captureFps`), parsed from the MP4 `meta` box.
-3. Container frame rate (`stts`/`mdhd`), with a **loud warning** that HFR footage may be time-stretched.
+The frame rate is never hard-coded. It is stored as an exact rational number (e.g. 1000/1, 240/1, 240000/1001), so drop-frame rates like 239.76 fps also work. Capture fps resolves in this order, and the chosen source is recorded in the output metadata:
+1. `--capture-fps <f>` CLI override. It accepts any positive value (`240`, `1000`, `239.76`, `240000/1001`).
+2. Camera metadata. Phase 1 reads Sony `NonRealTimeMeta` XML (`VideoFrame@captureFps`, such as `"1000p"` or `"240p"`) from the MP4 `meta` box. Each camera vendor gets its own small parser behind a `CaptureRateProbe` trait, so other cameras can be added once we have sample files from them.
+3. Container frame rate (`stts`/`mdhd`). This is correct for cameras that write high-frame-rate video at its true rate, such as a 240 fps file played back at 240 fps. But it is wrong for slow-motion recordings like C0141, so the tool prints a **warning**: "no capture-rate metadata found; assuming the container rate of N fps is real time — pass --capture-fps if this footage is slowed down."
+
+If the camera metadata and the container rate disagree, `piv info` shows both values.
 
 Then `dt = stride / capture_fps` and `velocity_px_per_s = displacement_px / dt`.
+
+**Choosing the stride for different frame rates.** Good correlation needs a displacement of roughly 2–8 px in the image plane. Particles must also stay inside the light sheet between the two frames, which means out-of-plane motion must be less than about ¼ of the sheet thickness. With a ~1 mm sheet, that limits out-of-plane speed to about 0.25 m/s at stride 1 and 1000 fps, or about 0.06 m/s at 240 fps. `piv analyze` prints the in-plane displacement statistics for each run, so you can tune `--stride`: increase it when motion is sub-pixel, and decrease it when there are many outliers or few valid vectors.
 
 ### 5.3 Preprocessing (`piv-core::preprocess`)
 - Optional background subtraction: a rolling temporal minimum or mean over N frames removes static glare, such as the bright band in the lower right.
@@ -93,25 +103,49 @@ Then `dt = stride / capture_fps` and `velocity_px_per_s = displacement_px / dt`.
 - Invalid vectors are replaced by the median of valid neighbours and **flagged, not hidden**. The flags are a bitfield: `NO_SIGNAL`, `LOW_PPR`, `MEDIAN_OUTLIER`, `REPLACED`.
 
 ### 5.6 Output (`piv-io::write`, `render`)
-- **NPZ, one file per frame pair:** `x`, `y`, `u`, `v` (px/s), `dx`, `dy` (px), `peak_ratio`, `flags`. A `run.json` sidecar holds every parameter, the capture fps and its source, dt, stride, frame indices, and the tool version.
-- **HDF5 (cargo feature `hdf5`, needs `brew install hdf5`):** a single file holding all pairs as one time series with the same fields and attributes.
+- **HDF5 (default), one file per run, written with `hdf5-metno` against the system libhdf5:**
+  - `/grid/x` and `/grid/y` (px): window centres, shared by every frame pair.
+  - `/fields/dx` and `/fields/dy` (px), `/fields/u` and `/fields/v` (px/s), `/fields/peak_ratio`, and `/fields/flags`. Each has shape `[n_pairs, ny, nx]` and is chunked one pair per chunk, so the file can be written while streaming and read one pair at a time.
+  - `/fields/u_mps` and `/fields/v_mps`, only when a physical scale is given (§5.7).
+  - `/pairs/frame_a`, `/pairs/frame_b`, and `/pairs/t` (s): the time of each pair's midpoint, measured from the clip start at the capture rate.
+  - Root attributes: every run parameter, the capture fps and its source, dt, stride, the scale inputs and result, the light-sheet thickness, the source file path and size, and the tool version. Pixel arrays are `f32`; flags are `u8`.
+  - The file can be read directly with `h5py` or MATLAB.
+- **NPZ (`--format npz`):** one `.npz` per frame pair plus a `run.json` sidecar, for environments without HDF5.
 - **Quiver overlays:** PNGs of each frame with arrows coloured by magnitude and invalid vectors drawn in a distinct colour. With `--video`, the PNGs are assembled into an MP4 by an ffmpeg subprocess.
+- **Quiver overlays:** PNGs of each frame with arrows coloured by magnitude and invalid vectors drawn in a distinct colour. With `--video`, the PNGs are assembled into an MP4 by an ffmpeg subprocess.
+
+### 5.7 Optional physical scale (`piv-io::scale`)
+Phase 1 does not do true calibration. It can, however, turn a user-entered field of view into an approximate metres-per-pixel scale. This assumes a pinhole camera looking straight at the sheet with no lens distortion:
+
+`m_per_px = 2 · D · tan(FOV / 2) / N_px`
+
+- `D` is the camera-to-sheet distance, `FOV` is the field of view, and `N_px` is the image width, height, or diagonal in pixels, depending on `--fov-axis`.
+- Inputs: `--fov-deg 84 --fov-axis diagonal|horizontal|vertical --sheet-distance <m>`.
+- The field of view alone is not enough; the distance is also required. If only `--fov-deg` is given, the tool stores it as metadata and outputs pixel units only.
+- The default axis is `diagonal`, because lens specs usually quote a diagonal angle; 84° matches the RX100's 24 mm-equivalent wide end.
+- **Caveat for this camera:** the RX100's high-frame-rate modes read out a cropped region of the sensor, so the *effective* field of view at 1000 fps is likely narrower than the 84° lens spec. The tool prints this caveat with the scale it computes.
+- `--px-per-mm <s>` sets the scale directly. Use it when you measure the scale from an object of known size in the frame; it is the more trustworthy option.
+- `--sheet-thickness-mm` (e.g. 1.0) is stored as metadata only and is used in the stride guidance printed per run (§5.2).
 
 ## 6. CLI
 
 ```
 piv info    clips/C0141.MP4
-            # prints resolution, frame count, container fps, capture fps + source
+            # prints resolution, frame count, container fps, capture fps + source,
+            # and real-time duration
 
-piv analyze clips/C0141.MP4 -o out/run1 \
+piv analyze clips/C0141.MP4 -o out/run1.h5 \
             --start 200 --end 400 --stride 2 \
             --window 64,32 --overlap 0.5 \
-            [--capture-fps 1000] [--channel luma|green] \
-            [--background min:50] [--format npz|hdf5] \
+            [--capture-fps 240] [--channel luma|green] \
+            [--background min:50] [--format hdf5|npz] \
+            [--fov-deg 84 --fov-axis diagonal --sheet-distance 0.5 | --px-per-mm 3.2] \
+            [--sheet-thickness-mm 1.0] \
             [--quiver] [--video] [--roi x,y,w,h]
 ```
 
-`--start`/`--end`/`--stride` let you process arbitrary sub-ranges and frame separations.
+- `--start`, `--end` and `--stride` let you process any sub-range of frames and any frame separation.
+- `--start` and `--end` take frame indices; `--start-s` and `--end-s` take real (capture-time) seconds instead.
 
 ## 7. Verification
 
@@ -121,35 +155,49 @@ piv analyze clips/C0141.MP4 -o out/run1 \
    - Solid-body rotation and linear shear: error is bounded and vectors don't point the wrong way.
    - Injected outliers are caught by the median test.
    - Blank windows get `NO_SIGNAL`.
-2. **Metadata test:** the parser returns `captureFps = 1000` for a small MP4 header fixture extracted from C0141, and container fallback produces a warning.
-3. **End-to-end smoke test** (ignored by default because it needs the clip): `piv analyze clips/C0141.MP4 --start 200 --end 260 --quiver --video`.
+2. **Timing and metadata tests:**
+   - The parser returns 1000 fps for a small MP4 header fixture extracted from C0141.
+   - The Sony XML parser handles `240p`, `1000p` and other rates.
+   - The container fallback produces the warning.
+   - Rational parsing of `--capture-fps` (`240`, `239.76`, `240000/1001`) works.
+   - `dt` is correct for each stride and frame rate.
+3. **Scale tests:** the formula in §5.7 gives the right result for each `--fov-axis` against hand-computed values; `--px-per-mm` overrides the FOV inputs; and FOV without a distance produces pixel units only.
+4. **HDF5 round-trip test:** write a small run, read it back with `hdf5-metno`, and check that the datasets, shapes and attributes match. A short Python snippet in the README shows reading the same file with `h5py`.
+5. **End-to-end smoke test** (ignored by default because it needs the clip): `piv analyze clips/C0141.MP4 -o out/smoke.h5 --start 200 --end 260 --quiver --video`.
    - Check that the run finishes, the vector count matches the grid, and the valid-vector fraction is reasonable in seeded regions.
    - Visually check that the quiver video follows the vortex motion.
    - Sanity check: displacements at stride 1 are a few px/frame, consistent with what the sample frames show.
-4. **Performance benchmark** (`criterion`): one 1920×1080 pair at 32 px / 50 % overlap. Target < 100 ms on Apple Silicon; full clip (3719 pairs) in a few minutes.
-5. `cargo clippy -- -D warnings` and `cargo fmt --check` stay clean.
+6. **Performance benchmark** (`criterion`): one 1920×1080 pair at 32 px / 50 % overlap. Target < 100 ms on Apple Silicon; full clip (3719 pairs) in a few minutes.
+7. `cargo clippy -- -D warnings` and `cargo fmt --check` stay clean.
 
 ## 8. Milestones (commits on `phase-1`)
 
 1. Workspace scaffold, CI-free `cargo test` green, `.gitignore`.
 2. `piv-core`: correlation + subpixel + synthetic tests.
 3. Multi-pass + validation + tests.
-4. `piv-io`: decoding, metadata/timing, `piv info`.
-5. Writers (NPZ, HDF5 feature) + `piv analyze`.
+4. `piv-io`: decoding, metadata/timing (any frame rate), `piv info`.
+5. HDF5 writer (default) + NPZ writer + optional scale + `piv analyze`.
 6. Quiver rendering + video.
 7. Benchmark, tuning on C0141, README usage section.
 
 ## 9. Setup and repo hygiene
 
-- Toolchain: `rustup` (stable), plus `brew install ffmpeg` (runtime for decoding and video). HDF5 is only needed for `--features hdf5`. None of these are installed on this machine yet.
+- Toolchain: `rustup` (stable), plus `brew install ffmpeg hdf5 pkg-config`.
+  - ffmpeg is needed at runtime for decoding and video.
+  - libhdf5 is needed at build time for `hdf5-metno`, which is a default feature. Building with `--no-default-features` gives an NPZ-only build without HDF5.
+  - None of these are installed on this machine yet.
 - `.gitignore`: `.DS_Store`, `target/`, `out/`, `clips/*.MP4`. The 482 MB clip stays local and untracked; Git LFS is an option if you want clips versioned.
 
 ## 10. Out of scope for phase 1 (candidate phase 2+)
-- Physical calibration (px → m via target or known field of view) and lens/perspective correction.
+- Target-based physical calibration (dot grid or checkerboard in the sheet plane) and lens/perspective correction. This replaces the approximate FOV scale from §5.7.
 - Window deformation (WIDIM), ensemble/time-averaged correlation, dense optical flow (Horn–Schunck / Farnebäck) as an alternative estimator for fog texture.
 - Derived quantities (vorticity, strain, streamlines), GPU acceleration, Python bindings (pyo3).
 
-## 11. Open questions for your review
-1. Is 1 ms (1000 fps) right for every clip you'll record, or will you also use 250/500 fps modes? The metadata parser handles all of them, but please confirm the override behaviour you want.
-2. Do you know the light-sheet thickness and the camera's field of view? This isn't needed now, but it shapes the phase 2 calibration design.
-3. Should the default output be NPZ or HDF5?
+## 11. Decisions from review
+1. **Frame rate:** support any capture rate (cameras on hand: 1000 fps and 240 fps), resolved from override → camera metadata → container (§5.2).
+2. **Field of view / sheet:** FOV is user-entered (84° for C0141), and an approximate m/s scale is produced only when a distance or `--px-per-mm` is also given (§5.7). The sheet thickness (~1 mm) is recorded and used for stride guidance.
+3. **Output:** HDF5 by default, with NPZ optional (§5.6).
+
+## 12. Remaining open questions
+1. Is the 84° FOV the lens's diagonal spec, or was it measured for the HFR-cropped frame? And roughly how far was the camera from the sheet?
+2. What is the second (240 fps) camera? A sample clip from it would let us add its metadata parser and a test fixture.
