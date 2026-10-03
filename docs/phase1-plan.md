@@ -69,6 +69,8 @@ docs/phase1-plan.md
 ### 5.1 Decoding (`piv-io::decode`)
 - A `FrameSource` trait with methods `next_frame() -> Option<(index, Frame)>`, `seek(index)`, and `len()`.
 - First implementation: **`ffmpeg-sidecar`**. It streams raw `gray` (the Y/luma plane), so we skip RGB conversion; luma is ~59 % green-weighted, which suits 532 nm light. A `--channel green` option uses `format=gbrp,extractplanes=g` instead.
+- **Bit depth:** 8-bit sources are decoded as `gray`. Sources with more than 8 bits, such as the iPhone's 10-bit HEVC (and Dolby Vision HDR when that is on), are decoded as `gray16le`. Either way, frames become `f32` normalized to 0–1, so the core never sees bit depth.
+  - HDR transfer curves (HLG/PQ) are left un-linearized in phase 1. Brightness doesn't need to be exact here, because correlation only cares that features move together. `piv info` reports the curve.
 - A sliding ring buffer of `stride + 1` frames, so memory stays constant for arbitrarily long clips.
 - Using a trait means we can later swap in in-process `ffmpeg-next` decoding, or image-sequence input (TIFF/PNG folders from scientific cameras), without touching the core.
 
@@ -76,6 +78,10 @@ docs/phase1-plan.md
 The frame rate is never hard-coded. It is stored as an exact rational number (e.g. 1000/1, 240/1, 240000/1001), so drop-frame rates like 239.76 fps also work. Capture fps resolves in this order, and the chosen source is recorded in the output metadata:
 1. `--capture-fps <f>` CLI override. It accepts any positive value (`240`, `1000`, `239.76`, `240000/1001`).
 2. Camera metadata. Phase 1 reads Sony `NonRealTimeMeta` XML (`VideoFrame@captureFps`, such as `"1000p"` or `"240p"`) from the MP4 `meta` box. Each camera vendor gets its own small parser behind a `CaptureRateProbe` trait, so other cameras can be added once we have sample files from them.
+   - **iPhone 17 Pro (240 fps), not yet tested — no sample footage:**
+     - The original slo-mo `.MOV` files are expected to store frames at the true 240 fps, with the slowdown applied only as playback metadata. If so, the container rate (step 3) is correct.
+     - Exported or shared copies may instead be re-timed to 30 fps. That would make the container rate wrong.
+     - The probe will read the QuickTime capture-rate tags when they are present, so a re-timed file can be detected. We'll confirm all of this, and add a test fixture, once there is a sample clip.
 3. Container frame rate (`stts`/`mdhd`). This is correct for cameras that write high-frame-rate video at its true rate, such as a 240 fps file played back at 240 fps. But it is wrong for slow-motion recordings like C0141, so the tool prints a **warning**: "no capture-rate metadata found; assuming the container rate of N fps is real time — pass --capture-fps if this footage is slowed down."
 
 If the camera metadata and the container rate disagree, `piv info` shows both values.
@@ -123,7 +129,14 @@ Phase 1 does not do true calibration. It can, however, turn a user-entered field
 - Inputs: `--fov-deg 84 --fov-axis diagonal|horizontal|vertical --sheet-distance <m>`.
 - The field of view alone is not enough; the distance is also required. If only `--fov-deg` is given, the tool stores it as metadata and outputs pixel units only.
 - The default axis is `diagonal`, because lens specs usually quote a diagonal angle; 84° matches the RX100's 24 mm-equivalent wide end.
-- **Caveat for this camera:** the RX100's high-frame-rate modes read out a cropped region of the sensor, so the *effective* field of view at 1000 fps is likely narrower than the 84° lens spec. The tool prints this caveat with the scale it computes.
+- **Caveat for this camera:** 84° is Sony's published *diagonal* spec for the lens at its 24 mm-equivalent wide end. The RX100's high-frame-rate modes read out a cropped region of the sensor, so the *effective* field of view at 1000 fps is narrower by an unknown crop factor. The tool prints this caveat with the scale it computes.
+- **Working estimate for C0141:** with FOV = 84° diagonal and D = 300 mm (an assumed distance; it wasn't measured):
+  - The frame diagonal spans 2 · 0.3 · tan 42° ≈ 0.540 m over 2203 px.
+  - That gives ≈ **0.245 mm/px (≈ 4.08 px/mm)**, so the frame covers about 471 × 265 mm.
+  - At 1000 fps, 1 px/frame ≈ 0.245 m/s, so the few-px/frame motion seen in the sample frames is roughly 0.5–1 m/s.
+  - Because of the sensor crop, the true mm/px is probably smaller, which means these m/s values are an **upper bound**.
+  - Use it for order-of-magnitude checks only: `piv analyze clips/C0141.MP4 --fov-deg 84 --fov-axis diagonal --sheet-distance 0.3 ...`.
+- **For future recordings:** record a few frames with a ruler or printed dot grid held in the light-sheet plane at the same camera settings, before or after each run. Measuring known spacing from those frames gives `--px-per-mm` directly, and that accounts for the HFR crop, the distance and the lens all at once. Phase 2 will automate this with target-based calibration.
 - `--px-per-mm <s>` sets the scale directly. Use it when you measure the scale from an object of known size in the frame; it is the more trustworthy option.
 - `--sheet-thickness-mm` (e.g. 1.0) is stored as metadata only and is used in the stride guidance printed per run (§5.2).
 
@@ -198,6 +211,8 @@ piv analyze clips/C0141.MP4 -o out/run1.h5 \
 2. **Field of view / sheet:** FOV is user-entered (84° for C0141), and an approximate m/s scale is produced only when a distance or `--px-per-mm` is also given (§5.7). The sheet thickness (~1 mm) is recorded and used for stride guidance.
 3. **Output:** HDF5 by default, with NPZ optional (§5.6).
 
+4. **Scale for C0141:** use the Sony published 84° diagonal and an assumed 300 mm distance, which gives about 0.245 mm/px. This is an upper bound because of the high-frame-rate sensor crop (§5.7). Future recordings will include a ruler or target frame for calibration.
+5. **240 fps camera:** the iPhone 17 Pro. It is designed for (container-rate plus QuickTime-tag probe, 10-bit HEVC decoding) but untested until there is footage.
+
 ## 12. Remaining open questions
-1. Is the 84° FOV the lens's diagonal spec, or was it measured for the HFR-cropped frame? And roughly how far was the camera from the sheet?
-2. What is the second (240 fps) camera? A sample clip from it would let us add its metadata parser and a test fixture.
+None blocking. When an iPhone 17 Pro clip is available, add it to `clips/` and we'll confirm the timing behaviour and add a fixture.
