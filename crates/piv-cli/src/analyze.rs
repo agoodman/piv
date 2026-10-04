@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, ValueEnum};
+use piv_core::flowstats::neighbour_noise;
 use piv_core::preprocess::{BackgroundEstimator, BackgroundMode};
 use piv_core::validate::ValidationConfig;
 use piv_core::{
@@ -14,9 +15,12 @@ use piv_core::{
     VectorField, flags,
 };
 use piv_io::decode::{DecodeOptions, FfmpegSource, FrameSource, read_frame};
+use piv_io::flow::{AIR_DENSITY, EnergyUnits, FlowSeries, pair_stats, usable};
+use piv_io::overlay::{decorate_png, readout, run_chart};
 use piv_io::render::{QuiverStyle, encode_video, render_quiver};
 use piv_io::write::{FieldWriter, OutputFormat, PairRecord, RunMetadata, create_writer};
 use piv_io::{Channel, FovAxis, MediaInfo, Roi, ScaleSpec, probe, resolve_capture_rate};
+use rayon::prelude::*;
 
 use crate::png::PngSink;
 
@@ -145,6 +149,9 @@ pub struct AnalyzeArgs {
     /// Draw every n-th vector.
     #[arg(long, default_value_t = 1, help_heading = "Output")]
     quiver_every: usize,
+    /// Plain quiver images: no vorticity / kinetic energy readout or chart.
+    #[arg(long, help_heading = "Output")]
+    no_overlay: bool,
 
     // ── Physical scale (optional) ───────────────────────────────────────────
     /// Measured scale in pixels per millimetre (preferred over FOV).
@@ -159,9 +166,12 @@ pub struct AnalyzeArgs {
     /// Camera-to-light-sheet distance in metres.
     #[arg(long, help_heading = "Scale")]
     sheet_distance: Option<f64>,
-    /// Light-sheet thickness in mm (metadata; used for stride guidance).
+    /// Light-sheet thickness in mm (stride guidance; total kinetic energy of the slab).
     #[arg(long, help_heading = "Scale")]
     sheet_thickness_mm: Option<f64>,
+    /// Fluid density in kg/m³ for kinetic energy (default: air at 20 °C).
+    #[arg(long, default_value_t = AIR_DENSITY, help_heading = "Scale")]
+    density: f64,
 }
 
 fn parse_background(s: &str) -> Result<Option<(BackgroundMode, usize)>> {
@@ -396,6 +406,10 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
     let mut writer: Option<Box<dyn FieldWriter>> = None;
     let mut style: Option<QuiverStyle> = None;
     let mut stats = Stats::default();
+    let mut series = FlowSeries::default();
+    let mut noise_px = Vec::new();
+    let mut quiver_pngs = Vec::new();
+    let mut grid_step = 0;
     let mut last_report = Instant::now();
     let show_progress = std::io::stderr().is_terminal();
     let t_loop = Instant::now();
@@ -462,6 +476,13 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
                 field,
             })?;
             stats.add(field);
+            let ok = usable(field.dx.view(), field.flags.view());
+            series.push(
+                time_s,
+                pair_stats(field.dx.view(), field.dy.view(), &ok, field.grid.step, dt),
+            );
+            noise_px.push(neighbour_noise(&field.dx, &field.dy, &ok));
+            grid_step = field.grid.step;
 
             if quiver {
                 let raw_a = a.raw.as_ref().context("internal: raw frame missing")?;
@@ -475,7 +496,9 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
                 });
                 let img = render_quiver(raw_a, field, &s);
                 if let Some(p) = &pngs {
-                    p.send(quiver_dir.join(format!("quiver_f{a_idx:06}.png")), img);
+                    let path = quiver_dir.join(format!("quiver_f{a_idx:06}.png"));
+                    quiver_pngs.push(path.clone());
+                    p.send(path, img);
                 }
             }
         }
@@ -506,6 +529,20 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         Some(w) => w.finish()?,
         None => bail!("no frame pairs were analysed"),
     }
+    let units = EnergyUnits {
+        m_per_px: scale.as_ref().map(|s| s.m_per_px),
+        thickness_m: args.sheet_thickness_mm.map(|t| t * 1e-3),
+        density: args.density,
+    };
+    match format {
+        #[cfg(feature = "hdf5")]
+        OutputFormat::Hdf5 => {
+            piv_io::flow::write_stats_hdf5(&args.output, "stats", &series, &units)?
+        }
+        #[cfg(not(feature = "hdf5"))]
+        OutputFormat::Hdf5 => unreachable!("create_writer refuses HDF5 without the feature"),
+        OutputFormat::Npz => piv_io::flow::write_stats_npz(&args.output, &series)?,
+    }
     ensure!(
         stats.pairs == pair_starts.len(),
         "analysed {} pairs, expected {} — the clip may be shorter than reported",
@@ -520,6 +557,19 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         stats.pairs as f64 / elapsed,
         args.output.display()
     );
+    if quiver && !args.no_overlay {
+        let t = Instant::now();
+        let chart = run_chart(&[&series], &units);
+        let n = series.len();
+        quiver_pngs
+            .par_iter()
+            .enumerate()
+            .try_for_each(|(i, path)| {
+                let lines = readout(None, series.t[i], i, n, &series.stats[i], &units);
+                decorate_png(path, &lines, &chart, i)
+            })?;
+        eprintln!("overlay: {:.1} s", t.elapsed().as_secs_f64());
+    }
     if quiver {
         println!("quiver: {pngs} PNGs in {}", quiver_dir.display());
     }
@@ -537,8 +587,63 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         args.sheet_thickness_mm,
         &args,
     );
+    print_flow(&series, &mut noise_px, dt, grid_step, &units);
     eprintln!("total time {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// Run-wide vorticity and kinetic energy, and the noise floor of the vorticity.
+fn print_flow(
+    series: &FlowSeries,
+    noise_px: &mut [f32],
+    dt: f64,
+    step: usize,
+    units: &EnergyUnits,
+) {
+    let col = |f: fn(&piv_core::FlowStats) -> f32| -> Vec<f32> {
+        series
+            .column(f)
+            .into_iter()
+            .filter(|x| x.is_finite())
+            .collect()
+    };
+    let mut w = col(|s| s.vorticity_mean);
+    if w.is_empty() {
+        return;
+    }
+    let mean = |v: &[f32]| v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+    let mut wa = col(|s| s.vorticity_abs_mean);
+    let mut e: Vec<f32> = col(|s| s.ke_sum)
+        .into_iter()
+        .map(|x| units.ke_total(x).0 as f32)
+        .collect();
+    let (_, ke_unit) = units.ke_total(0.0);
+    println!(
+        "flow:    ω mean {:+.2} 1/s over the run (pairs {:+.2} … {:+.2}); |ω| mean {:.2} 1/s",
+        mean(&w),
+        percentile(&mut w, 0.0),
+        percentile(&mut w, 1.0),
+        mean(&wa),
+    );
+    println!(
+        "         KE median {} {ke_unit}, peak {} {ke_unit} ({})",
+        piv_io::overlay::fmt_num(percentile(&mut e, 0.5) as f64),
+        piv_io::overlay::fmt_num(percentile(&mut e, 1.0) as f64),
+        units.ke_total_label()
+    );
+    // Per-point ω noise with central differences is σ_u / step; |ω| of pure noise averages
+    // √(2/π) of that.
+    let mut noise: Vec<f32> = noise_px.iter().copied().filter(|x| x.is_finite()).collect();
+    let sigma_px = percentile(&mut noise, 0.5);
+    if sigma_px.is_finite() {
+        let sigma_w = sigma_px as f64 / dt / step.max(1) as f64;
+        println!(
+            "noise:   ≈{sigma_px:.2} px per vector (neighbour residual, an upper bound) → ω ±{sigma_w:.1} 1/s per point; \
+             |ω| mean of noise alone ≈ {:.1} 1/s (median |ω| mean here {:.1})",
+            sigma_w * (2.0 / std::f64::consts::PI).sqrt(),
+            percentile(&mut wa, 0.5)
+        );
+    }
 }
 
 /// `out/run.h5` + `_quiver` → `out/run_quiver`.

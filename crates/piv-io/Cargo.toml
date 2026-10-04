@@ -19,7 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 hdf5-metno = { version = "0.15", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
-imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
+imageproc = { version = "0.27", default-features = false, features = ["rayon", "text"] }
+ab_glyph = "0.2"
 ndarray-npy = { version = "0.10", default-features = false, features = ["compressed_npz"] }
 
 [dev-dependencies]

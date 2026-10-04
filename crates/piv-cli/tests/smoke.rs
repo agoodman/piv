@@ -52,6 +52,8 @@ fn analyze_writes_hdf5_quiver_and_video() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(stdout.contains("analysed 55 pairs"), "{stdout}");
+    assert!(stdout.contains("flow:    ω mean"), "{stdout}");
+    assert!(stdout.contains("µJ"), "{stdout}");
 
     let file = hdf5_metno::File::open(&h5).unwrap();
     let nx = file.dataset("grid/x").unwrap().shape()[0];
@@ -87,6 +89,28 @@ fn analyze_writes_hdf5_quiver_and_video() {
     let (median, max) = (mags[mags.len() / 2], *mags.last().unwrap());
     assert!(max <= 48.0, "max |d| {max}");
     assert!((0.1..10.0).contains(&median), "median |d| {median}");
+
+    for name in [
+        "vorticity_mean",
+        "vorticity_abs_mean",
+        "ke_mean",
+        "ke_sum",
+        "coverage",
+    ] {
+        let ds = file.dataset(&format!("stats/{name}")).unwrap();
+        assert_eq!(ds.shape(), vec![55], "{name}");
+    }
+    let cov: Vec<f32> = file.dataset("stats/coverage").unwrap().read_raw().unwrap();
+    assert!(cov.iter().all(|c| (0.0..=1.0).contains(c)));
+
+    // Overlays sit on top of full-width frames without changing their size.
+    let png = std::fs::read_dir(dir.path().join("smoke_quiver"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(png_header(&png), (1920, 1080));
 
     let pngs = std::fs::read_dir(dir.path().join("smoke_quiver"))
         .unwrap()
@@ -148,6 +172,10 @@ fn smooth_sweep_and_output() {
     let file = hdf5_metno::File::open(&sm).unwrap();
     let u: ndarray::Array3<f32> = file.dataset("fields/u").unwrap().read().unwrap();
     let raw: ndarray::Array3<f32> = file.dataset("raw/dx").unwrap().read().unwrap();
+    for g in ["stats", "raw/stats"] {
+        let n = file.dataset(&format!("{g}/ke_sum")).unwrap().shape()[0];
+        assert_eq!(n, raw.shape()[0], "{g}");
+    }
     assert_eq!(u.dim(), raw.dim());
     // The spatial pass never fills points the temporal pass rejected (default min support 3).
     let support: ndarray::Array3<u16> = file.dataset("fields/support").unwrap().read().unwrap();
@@ -200,4 +228,11 @@ fn smooth_sweep_and_output() {
         .unwrap();
     assert!(!bad.status.success());
     assert!(!dir.path().join("y.h5").exists());
+}
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_header(path: &std::path::Path) -> (u32, u32) {
+    let b = std::fs::read(path).unwrap();
+    let be = |i: usize| u32::from_be_bytes(b[i..i + 4].try_into().unwrap());
+    (be(16), be(20))
 }

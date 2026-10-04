@@ -6,6 +6,8 @@ use ndarray::{Array1, Array3, Axis, Zip};
 use piv_core::smooth::{self, Smoothed, TemporalKernel};
 use piv_core::{Grid, VectorField, flags};
 use piv_io::decode::{Channel, DecodeOptions, FfmpegSource, FrameSource, Roi};
+use piv_io::flow::{AIR_DENSITY, EnergyUnits, FlowSeries, pair_stats, usable, write_stats_hdf5};
+use piv_io::overlay::{self, draw_readout, fmt_num, readout, run_chart};
 use piv_io::probe;
 use piv_io::render::{QuiverStyle, RgbImage, encode_video, render_quiver};
 use piv_io::run_file::{RunData, SmoothedFields, read_run, write_smoothed};
@@ -54,6 +56,12 @@ pub struct SmoothArgs {
     /// Draw every n-th vector.
     #[arg(long, default_value_t = 1)]
     quiver_every: usize,
+    /// Plain comparison video: no vorticity / kinetic energy readouts or chart.
+    #[arg(long)]
+    no_overlay: bool,
+    /// Fluid density in kg/m³ for kinetic energy (default: air at 20 °C).
+    #[arg(long, default_value_t = AIR_DENSITY)]
+    density: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -477,6 +485,11 @@ pub fn run(args: SmoothArgs) -> Result<()> {
             settings: settings_json,
         },
     )?;
+    let (grid, _) = run_grid(&run)?;
+    let flow = Flow::new(&run, &sm.dx, &sm.dy, grid.step, args.density)?;
+    write_stats_hdf5(output, "stats", &flow.smoothed, &flow.units)?;
+    write_stats_hdf5(output, "raw/stats", &flow.raw, &flow.units)?;
+    flow.print();
     println!("\nwrote {}", output.display());
 
     if args.video {
@@ -488,9 +501,73 @@ pub fn run(args: SmoothArgs) -> Result<()> {
             output,
             args.video_fps,
             args.quiver_every,
+            (!args.no_overlay).then_some(&flow),
         )?;
     }
     Ok(())
+}
+
+/// Per-pair vorticity and kinetic energy of the raw and smoothed fields.
+struct Flow {
+    raw: FlowSeries,
+    smoothed: FlowSeries,
+    units: EnergyUnits,
+}
+
+impl Flow {
+    fn new(
+        run: &RunData,
+        dx: &Array3<f32>,
+        dy: &Array3<f32>,
+        step: usize,
+        density: f64,
+    ) -> Result<Self> {
+        let dt = run.dt()?;
+        let (mut raw, mut smoothed) = (FlowSeries::default(), FlowSeries::default());
+        fn at(a: &Array3<f32>, i: usize) -> ndarray::ArrayView2<'_, f32> {
+            a.index_axis(Axis(0), i)
+        }
+        for (i, &t) in run.t.iter().enumerate() {
+            let at = |a| at(a, i);
+            let ok = usable(at(&run.dx), run.flags.index_axis(Axis(0), i));
+            raw.push(t, pair_stats(at(&run.dx), at(&run.dy), &ok, step, dt));
+            let ok = at(dx).mapv(f32::is_finite);
+            smoothed.push(t, pair_stats(at(dx), at(dy), &ok, step, dt));
+        }
+        let units = EnergyUnits {
+            m_per_px: run.m_per_px(),
+            thickness_m: run.meta["sheet_thickness_mm"].as_f64().map(|t| t * 1e-3),
+            density,
+        };
+        Ok(Self {
+            raw,
+            smoothed,
+            units,
+        })
+    }
+
+    fn print(&self) {
+        let (_, unit) = self.units.ke_total(0.0);
+        println!("\nflow (run medians)     ω mean 1/s   |ω| mean 1/s   KE {unit:<8} measured");
+        for (name, s) in [("raw", &self.raw), ("smoothed", &self.smoothed)] {
+            let median = |f: fn(&piv_core::FlowStats) -> f32| {
+                let mut v: Vec<f32> = s.column(f).into_iter().filter(|x| x.is_finite()).collect();
+                v.sort_by(f32::total_cmp);
+                if v.is_empty() {
+                    f32::NAN
+                } else {
+                    quantile(&v, 0.5)
+                }
+            };
+            println!(
+                "  {name:<20} {:>10}   {:>12}   {:>11}   {:>7.0}%",
+                fmt_num(median(|x| x.vorticity_mean) as f64),
+                fmt_num(median(|x| x.vorticity_abs_mean) as f64),
+                fmt_num(self.units.ke_total(median(|x| x.ke_sum)).0),
+                100.0 * median(|x| x.coverage),
+            );
+        }
+    }
 }
 
 fn sweep(prep: &Prepared, min_support: Option<usize>) -> Result<()> {
@@ -628,6 +705,7 @@ fn run_percentiles(prep: &Prepared) -> (f32, f32) {
     (quantile(&m, 0.75), quantile(&m, 0.95))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn comparison_video(
     run: &RunData,
     prep: &Prepared,
@@ -636,6 +714,7 @@ fn comparison_video(
     output: &Path,
     fps: f64,
     every: usize,
+    flow: Option<&Flow>,
 ) -> Result<()> {
     let (grid, roi) = run_grid(run)?;
     let source = PathBuf::from(run.meta["source_path"].as_str().context("source_path")?);
@@ -672,6 +751,8 @@ fn comparison_video(
     let mut src = FfmpegSource::open(&source, &opts)?;
     let pngs = PngSink::spawn();
     let mut style: Option<QuiverStyle> = None;
+    let chart = flow.map(|f| run_chart(&[&f.raw, &f.smoothed], &f.units));
+    let n_pairs = run.len();
     while let Some((idx, frame)) = src.next_frame()? {
         let Some(&t) = by_frame.get(&idx) else {
             continue;
@@ -690,14 +771,34 @@ fn comparison_video(
                 ..auto
             }
         });
-        let (left, right) = (
+        let (mut left, mut right) = (
             render_quiver(&frame, &raw, &s),
             render_quiver(&frame, &sm, &s),
         );
         let (w, h) = left.dimensions();
-        let mut both = RgbImage::new(2 * w + 8, h);
+        let layout = overlay::layout(w, h);
+        if let Some(f) = flow {
+            let m = (layout.text_px * 0.6) as u32;
+            for (img, name, series) in [
+                (&mut left, "raw", &f.raw),
+                (&mut right, "smoothed", &f.smoothed),
+            ] {
+                let lines = readout(Some(name), run.t[t], t, n_pairs, &series.stats[t], &f.units);
+                draw_readout(img, &lines, m, m, layout.text_px);
+            }
+        }
+        let height = if flow.is_some() { layout.height } else { h };
+        let mut both = RgbImage::new(2 * w + 8, height);
         image_copy(&mut both, &left, 0);
         image_copy(&mut both, &right, w + 8);
+        if let Some(c) = &chart {
+            // On the right (smoothed) panel; raw is the dim trace behind.
+            let r = overlay::Rect {
+                x: layout.chart.x + w + 8,
+                ..layout.chart
+            };
+            overlay::draw_chart(&mut both, r, c, t, layout.text_px);
+        }
         pngs.send(dir.join(format!("compare_f{idx:06}.png")), both);
     }
     let n = pngs.finish()?;
