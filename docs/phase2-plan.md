@@ -164,7 +164,7 @@ directory). `piv smooth` writes them for the smoothed fields and copies the raw 
 |---|---|---|---|
 | analyze, smooth | `--no-overlay` | off | plain quiver video, as in phase 1 |
 | analyze | `--density` | 1.204 | fluid density (kg/m³) for total KE |
-| smooth | `--density` | from run, else 1.204 | |
+| smooth | `--density` | 1.204 | |
 
 `piv analyze` also prints the run-mean and peak of each quantity, plus the |ω| noise floor, in
 its summary.
@@ -175,7 +175,7 @@ its summary.
   - Solid-body rotation u = −Ω(y−y₀), v = Ω(x−x₀): ω = 2Ω everywhere, checking sign for
     counter-clockwise on screen with y down.
   - Uniform translation: ω = 0, KE = ½|U|².
-  - Pure shear u = γy: ω = −γ (in the flipped convention).
+  - Pure shear u = γy (y down, so the bottom moves right relative to the top): ω = +γ.
   - Point vortex pair: signed mean ≈ 0, mean |ω| > 0.
   - Holes and edges: NaN neighbours handled, `n_vorticity` correct.
 - **Synthetic end-to-end:** `piv-core::synthetic` already makes displaced particle images. Add a

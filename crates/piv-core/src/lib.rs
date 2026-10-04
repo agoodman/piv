@@ -8,7 +8,8 @@
 //!    window offset and Gaussian sub-pixel peak fitting.
 //! 3. [`validate`]: peak-ratio and normalized-median tests, replacement of outliers.
 //!
-//! [`smooth`] post-processes a time series of fields (temporal and spatial filtering).
+//! [`smooth`] post-processes a time series of fields (temporal and spatial filtering), and
+//! [`flowstats`] summarizes a field as mean vorticity and kinetic energy.
 //!
 //! All displacements are in pixels; converting to velocity is a matter of dividing by the
 //! frame separation from [`frame::FrameRate::dt`].
@@ -18,6 +19,7 @@
 pub mod correlate;
 pub mod error;
 pub mod field;
+pub mod flowstats;
 pub mod frame;
 pub mod grid;
 pub mod multipass;
@@ -28,6 +30,7 @@ pub mod validate;
 
 pub use error::PivError;
 pub use field::{VectorField, flags};
+pub use flowstats::{FlowStats, flow_stats};
 pub use frame::{Frame, FrameRate};
 pub use grid::Grid;
 pub use multipass::{MaskConfig, PivAnalyzer, PivConfig};

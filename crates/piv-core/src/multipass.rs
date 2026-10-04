@@ -358,6 +358,24 @@ mod tests {
     }
 
     #[test]
+    fn solid_body_rotation_vorticity() {
+        // Image-axis rotation u = −Ω(y − c), v = Ω(x − c) turns clockwise on screen (y down),
+        // so the recovered mean vorticity should be −2Ω (per pair, displacements in px).
+        let (c, omega) = (127.5, 0.03);
+        let truth = move |x: f32, y: f32| (-omega * (y - c), omega * (x - c));
+        let (a, b) = synthetic::particle_pair(256, 256, 6, 0.04, 1.2, truth);
+        let f = run(&a, &b, vec![64, 32]).field;
+        let ok = f.flags.mapv(|fl| fl & crate::flags::INVALID == 0);
+        let s = crate::flow_stats(&f.dx, &f.dy, &ok, f.grid.step as f32);
+        assert!(
+            (s.vorticity_mean + 2.0 * omega).abs() < 0.1 * 2.0 * omega,
+            "ω {} vs {}",
+            s.vorticity_mean,
+            -2.0 * omega
+        );
+    }
+
+    #[test]
     fn linear_shear() {
         let (c, gamma) = (127.5, 0.025);
         let truth = move |_x: f32, y: f32| (gamma * (y - c), 0.0);
