@@ -108,11 +108,14 @@ fn put3<T: H5Type>(g: &Group, name: &str, data: &Array3<T>) -> Result<()> {
     Ok(())
 }
 
-/// Writes a smoothed run. Layout matches `piv analyze` output, so the same reading code works:
+/// Writes a smoothed run. The velocity datasets have the same names as in `piv analyze` output,
+/// so code reading `fields/u`, `fields/flags`, … works unchanged. A smoothed value has no
+/// correlation peak, so there is no `fields/peak_ratio`; the raw one is under `/raw`.
 ///
 /// ```text
 /// /fields/dx, dy, u, v, (u_mps, v_mps)   smoothed values (NaN where there is no output)
-/// /fields/support                        raw vectors that contributed (temporal window)
+/// /fields/support                        raw vectors that contributed (temporal window, or
+///                                        spatial kernel when smoothing only spatially)
 /// /fields/flags                          1 = no smoothed value
 /// /raw/dx, dy, flags, peak_ratio         the original fields, unchanged
 /// /grid, /pairs                          copied

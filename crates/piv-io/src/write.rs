@@ -194,11 +194,7 @@ pub mod hdf5_out {
         t: Dataset,
     }
 
-    pub(crate) fn stack<T: H5Type>(
-        g: &Group,
-        name: &str,
-        (ny, nx): (usize, usize),
-    ) -> Result<Dataset> {
+    fn stack<T: H5Type>(g: &Group, name: &str, (ny, nx): (usize, usize)) -> Result<Dataset> {
         g.new_dataset::<T>()
             .shape(Extents::new(vec![
                 Extent::resizable(0),
@@ -212,7 +208,7 @@ pub mod hdf5_out {
             .with_context(|| format!("creating dataset {name}"))
     }
 
-    pub(crate) fn series<T: H5Type>(g: &Group, name: &str) -> Result<Dataset> {
+    fn series<T: H5Type>(g: &Group, name: &str) -> Result<Dataset> {
         g.new_dataset::<T>()
             .shape(Extents::new(vec![Extent::resizable(0)]))
             .chunk(1024)

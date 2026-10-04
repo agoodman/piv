@@ -149,6 +149,13 @@ fn smooth_sweep_and_output() {
     let u: ndarray::Array3<f32> = file.dataset("fields/u").unwrap().read().unwrap();
     let raw: ndarray::Array3<f32> = file.dataset("raw/dx").unwrap().read().unwrap();
     assert_eq!(u.dim(), raw.dim());
+    // The spatial pass never fills points the temporal pass rejected (default min support 3).
+    let support: ndarray::Array3<u16> = file.dataset("fields/support").unwrap().read().unwrap();
+    assert!(
+        u.iter()
+            .zip(&support)
+            .all(|(u, &s)| !u.is_finite() || s >= 3)
+    );
     assert!(
         dir.path()
             .join("smooth_compare.mp4")
@@ -168,4 +175,29 @@ fn smooth_sweep_and_output() {
         .output()
         .unwrap();
     assert!(!bad.status.success());
+
+    // A min support larger than the window would give an empty output.
+    let bad = Command::new(piv)
+        .arg("smooth")
+        .arg(&h5)
+        .arg("-o")
+        .arg(dir.path().join("x.h5"))
+        .args(["--temporal", "5", "--min-support", "9"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    assert!(!dir.path().join("x.h5").exists());
+
+    // An existing comparison directory is reported before anything is written.
+    std::fs::create_dir(dir.path().join("y_compare")).unwrap();
+    let bad = Command::new(piv)
+        .arg("smooth")
+        .arg(&h5)
+        .arg("-o")
+        .arg(dir.path().join("y.h5"))
+        .args(["--temporal", "5", "--video"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    assert!(!dir.path().join("y.h5").exists());
 }

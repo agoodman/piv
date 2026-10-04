@@ -161,9 +161,10 @@ impl PivAnalyzer {
         let n = grid.window;
         let plan = &self.plans[&n];
         let mask = &self.cfg.mask;
-        // Fractional origins need one extra pixel for interpolation.
-        let max_x = (w - n - 1) as f32;
-        let max_y = (h - n - 1) as f32;
+        // Fractional origins need one extra pixel for interpolation. A window as wide as the
+        // image has no room to move: its origin stays at 0 and it is read without interpolation.
+        let max_x = (w - n).saturating_sub(1) as f32;
+        let max_y = (h - n).saturating_sub(1) as f32;
 
         let cells: Vec<(f32, f32, f32, u8)> = (0..grid.len())
             .into_par_iter()
@@ -315,6 +316,19 @@ mod tests {
             .unwrap();
         let (rms, worst, _) = errors(&r.field, |_, _| (u, v), 20.0, 256.0);
         assert!(rms < 0.1, "rms {rms} worst {worst} {:?}", r.summary);
+    }
+
+    #[test]
+    fn window_as_large_as_the_image() {
+        let (u, v) = (1.5, -0.5);
+        let (a, b) = synthetic::particle_pair(64, 64, 3, 0.04, 1.2, |_, _| (u, v));
+        let r = run(&a, &b, vec![64]);
+        assert_eq!(r.field.grid.len(), 1);
+        let (dx, dy) = (r.field.dx[[0, 0]], r.field.dy[[0, 0]]);
+        assert!((dx - u).abs() < 0.2 && (dy - v).abs() < 0.2, "({dx}, {dy})");
+        // With a predictor the window still cannot move.
+        let r = run(&a, &b, vec![64, 64]);
+        assert!(r.field.dx[[0, 0]].is_finite());
     }
 
     #[test]

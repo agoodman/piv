@@ -99,19 +99,28 @@ piv smooth out/run1.h5 -o out/run1_t9.h5 --temporal 9 --video
 | `--temporal N` | moving filter over N consecutive pairs (odd) at each grid point |
 | `--temporal-kernel median\|mean` | median (default) resists leftover outliers; mean removes slightly more noise |
 | `--spatial σ` | Gaussian low-pass, σ in grid cells, skipping missing vectors |
-| `--min-support N` | raw vectors needed in the temporal window (default N/3) |
+| `--min-support N` | raw vectors needed in the temporal window (default N/3, at most N); also applies after `--spatial` |
 
 Only accepted raw vectors contribute, and outputs are produced only where the window had
-seeding in that pair. The output has the same layout as `piv analyze` (`fields/u`, …) with
-smoothed values, plus `fields/support` (contributing vectors) and the untouched raw fields under
-`raw/`; the settings are in the `smoothing_json` attribute.
+seeding in that pair. The output uses the same dataset names as `piv analyze` (`fields/u`,
+`fields/flags`, …) with smoothed values, plus `fields/support` (contributing vectors). The
+untouched raw fields are under `raw/`, including `raw/peak_ratio` (a smoothed vector has no
+correlation peak, so there is no `fields/peak_ratio`). The settings are in the `smoothing_json`
+attribute.
 
 The sweep's **CV error** predicts each accepted raw vector from neighbours that share no data
-with it (overlapping windows and pairs sharing a frame are left out) and reports the median
-miss. Lower is better, and it cannot go below the raw measurement noise. On the sample clips,
-temporal smoothing beats spatial: temporal 9–25 reaches ≈0.30–0.35 px, while any spatial
-smoothing scores worse than temporal alone, because the fog field really varies from one grid
-cell to the next.
+with it and reports the median miss. Pairs sharing a frame are left out, and so are windows
+closer than the largest (first-pass) window, using the real grid step. Every setting is scored on
+the same vectors (those all of them can predict); `CV own` is each setting's score on everything
+it predicts. Lower is better, and it cannot go below the raw measurement noise. A spatial filter
+whose kernel lies mostly inside the left-out block cannot be scored this way: with the default
+`[96, 64]` windows at 50% overlap that block is 5×5 cells, so σ ≤ 2 shows `–`.
+
+On the sample clips (stride 5), temporal smoothing scores best: 9–25 pairs reach ≈0.30 px on
+C0141 and ≈0.28 px on C0005, with the mean kernel slightly ahead of the median and little to
+choose between 9 and 25. The spatial settings that can be scored (σ ≥ 3) do much worse
+(≈0.38–0.53 px), alone or after temporal smoothing, because the fog field really varies from one
+grid cell to the next. Smaller σ cannot be checked this way; judge it from the comparison video.
 
 ## Layout
 
