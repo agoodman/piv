@@ -18,7 +18,7 @@ overlay renderer, a step that writes the per-pair series to the run file, and CL
 ## 2. Definitions
 
 All quantities are computed on the grid of accepted vectors (`flags & INVALID == 0`, including
-`REPLACED` vectors, since the quiver draws those too; see decision D4). Velocities are in px/s
+`REPLACED` vectors, since the quiver draws those too; D4). Velocities are in px/s
 from `fields/u, v`, or m/s when the run has a scale.
 
 ### 2.1 Vorticity
@@ -38,29 +38,31 @@ and next to holes when the other neighbour is valid.
   - **mean ω** (signed): overall net rotation, i.e. which way the flow turns as a whole.
   - **mean |ω|**: how much rotation there is in any direction (a measure of activity).
 
-  Both appear in the text overlay. The chart plots one of them (decision D1).
+  Both appear in the text overlay. The chart plots the signed mean (D1).
 
 ### 2.2 Kinetic energy
 
 Without a density and a depth we can't compute joules from the vector field alone, so the values
 are layered by what the run knows:
 
-| Run has | Quantity shown | Units |
+The total is a sum over the **measured cells only** (D2): accepted and interpolated vectors,
+each standing for one grid cell of area A_cell = step². The readout also shows the mean per unit
+mass, ½⟨u² + v²⟩.
+
+| Run has | Total KE shown | Units |
 |---|---|---|
-| no scale | KE per unit mass, ½⟨u² + v²⟩ (mean over accepted vectors) | px²/s² |
-| scale (`--px-per-mm` or FOV + distance) | same, in physical units | m²/s² (J/kg) |
+| no scale | ½ Σ (u² + v²) · A_cell (per unit density and sheet depth) | px⁴/s² |
+| scale (`--px-per-mm` or FOV + distance) | ½ ρ Σ (u² + v²) · A_cell (per metre of sheet depth) | mJ/m |
 | scale + `--sheet-thickness-mm` | **total KE in the measured slab**, ½ ρ Σ (u² + v²) · A_cell · thickness | µJ |
 
-ρ defaults to air at 20 °C (1.204 kg/m³), and there's a new `--density` flag to override it. In the
-third row only the in-plane components are counted. The out-of-plane velocity w is unknown, so
-the value is a lower bound, and the legend says "in-plane".
+ρ defaults to air at 20 °C (1.204 kg/m³), and there's a new `--density` flag to override it. Only
+the in-plane components are counted. The out-of-plane velocity w is unknown, so the value is a
+lower bound, and the legend says "in-plane".
 
-**Coverage problem with "total":** a plain sum over accepted vectors rises and falls with the
-number of seeded windows, not just with the flow. When fog drifts out of the sheet the "energy"
-falls even if the air keeps moving. The plan computes the total as **mean per-cell KE × the
-number of grid cells in the ROI**, which extrapolates the measured mean over the whole region.
-The coverage fraction is shown next to it so a low-coverage value can be spotted. The sum over
-measured cells only is the alternative (decision D2).
+**Coverage caveat:** a sum over measured cells rises and falls with the number of seeded
+windows as well as with the flow. When fog drifts out of the sheet the total drops even if the
+air keeps moving. The coverage fraction is shown next to the total so these dips can be told
+apart from real changes in the flow.
 
 ### 2.3 Noise floor (expect this in the numbers)
 
@@ -68,8 +70,8 @@ Raw vectors on the sample clips have ≈0.3 px of noise (CV error, phase-1 READM
 1000 fps (dt = 5 ms) that is σ_u ≈ 60 px/s. With the default 32 px grid step:
 
 - **Per-point ω noise** ≈ σ_u / step ≈ 2 s⁻¹. Signed mean ω averages this away over hundreds of
-  vectors. Mean |ω| does not: pure noise alone gives about 1.5 s⁻¹. That floor will be printed in
-  the run summary so real rotation can be told from noise.
+  vectors. Mean |ω| does not: pure noise alone gives about 1.5 s⁻¹. The run summary prints both
+  floors (the signed mean's is σ_ω/√n) so real rotation can be told from noise.
 - **KE bias:** noise adds about σ_u² ≈ 3600 px²/s² to ½⟨u² + v²⟩. That matters only for slow
   flows.
 
@@ -100,17 +102,16 @@ module only sees arrays and a step.
 
 - `draw_readout(img, &Readout)`: a semi-transparent dark box with 3–4 lines of text.
 - `draw_chart(img, &Series, cursor: usize, &ChartStyle)`: a semi-transparent panel holding two
-  stacked strips that share a time axis (vorticity on top, KE below). Each strip has its own y
-  range. Axis limits are fixed from the whole run so the chart doesn't rescale between frames.
-  The full trace is drawn dim and the part up to the cursor bright, with a vertical cursor line
-  (decision D3).
+  stacked strips that share a time axis (signed mean vorticity on top with a zero line, total KE
+  below). Each strip has its own y range. Axis limits are fixed from the whole run so the chart
+  doesn't rescale between frames. The full trace is drawn dim and the part up to the cursor
+  bright, with a vertical cursor line (D3).
 - Panel size scales with the frame: about 35 % of the width and 22 % of the height, clamped to a
   minimum readable size. If the frame (or ROI) is narrower than ~480 px, the chart goes in a
   strip **below** the image instead of on top of it.
 - Text uses `imageproc::drawing::draw_text_mut` (ab_glyph) with an embedded TTF. Plan: DejaVu
   Sans Mono (permissive Bitstream Vera licence, ~340 KB, included with `include_bytes!`, licence
-  file in `crates/piv-io/assets/`). The alternative is a small hand-coded bitmap font with no
-  asset (decision D5).
+  file in `crates/piv-io/assets/`) (D5).
 - Colours avoid the quiver colour map (light blue → yellow → red) and the magenta used for
   replaced vectors. Vorticity is drawn in white/light grey, KE in green-cyan, and the text is
   white on ~60 % black.
@@ -141,14 +142,17 @@ directly, without a decorate pass. The video is side-by-side raw | smoothed:
 ### 3.5 Writing the series to the run file
 
 The overlay data is useful on its own, for example for comparing runs or plotting in Python, so
-it is also saved (decision D6):
+it is also saved (D6):
 
 | Dataset | Shape | Units |
 |---|---|---|
 | `stats/vorticity_mean`, `stats/vorticity_abs_mean` | `[pairs]` | 1/s |
-| `stats/ke_mean` | `[pairs]` | px²/s² (and `stats/ke_mean_si`, m²/s², with a scale) |
-| `stats/ke_total_uj` | `[pairs]` | µJ (only with scale + thickness) |
-| `stats/coverage` | `[pairs]` | fraction |
+| `stats/ke_mean` | `[pairs]` | px²/s² (½⟨u² + v²⟩) |
+| `stats/ke_sum` | `[pairs]` | px⁴/s² (½ Σ (u² + v²) · A_cell, measured cells) |
+| `stats/coverage` | `[pairs]` | fraction of grid cells measured |
+
+Physical totals (mJ/m, µJ) depend on `--density`, so they are not stored. They are `ke_sum` ×
+ρ × m_per_px⁴ (× thickness), and the conversion is in the dataset's attributes.
 
 `piv analyze` adds these once the run finishes (HDF5 only; for NPZ, a `stats.npz` in the
 directory). `piv smooth` writes them for the smoothed fields and copies the raw ones to
@@ -159,7 +163,6 @@ directory). `piv smooth` writes them for the smoothed fields and copies the raw 
 | Command | Option | Default | Meaning |
 |---|---|---|---|
 | analyze, smooth | `--no-overlay` | off | plain quiver video, as in phase 1 |
-| analyze, smooth | `--chart vorticity\|abs-vorticity\|both` | per D1 | which vorticity trace to chart |
 | analyze | `--density` | 1.204 | fluid density (kg/m³) for total KE |
 | smooth | `--density` | from run, else 1.204 | |
 
@@ -198,17 +201,17 @@ its summary.
 I'll stop after milestone 4 so you can review the videos before the docs and findings are
 written.
 
-## 7. Decisions for review
+## 7. Decisions from review (2026-10-04)
 
-| # | Question | Recommendation |
+| # | Question | Decision |
 |---|---|---|
-| D1 | Which vorticity to **chart**: signed mean, mean \|ω\|, or both on the top strip? | **Both**: signed as a solid line around a zero line, \|ω\| as a fainter line, with the \|ω\| noise floor as a dashed line. The readout shows both either way. |
-| D2 | "Total" KE: extrapolate the mean to the full ROI (stable when coverage changes), or sum only the measured cells? | **Extrapolate**, with coverage % shown beside it. |
-| D3 | Chart style: whole run drawn with a moving cursor, or a trace that grows up to the current time? | **Whole run + cursor** (shows what's coming; axes fixed). |
-| D4 | Include interpolated (`REPLACED`) vectors in the statistics? | **Yes** for vorticity (holes break the derivative stencil), but they are counted separately in coverage. |
-| D5 | Font: embedded TTF (DejaVu Sans Mono, +~340 KB) or a hand-made bitmap font? | **Embedded TTF**: better looking, scales with the frame size. |
-| D6 | Write `stats/` series to the run file, or overlay only? | **Write them**: cheap, and lets you plot or compare runs without the video. |
-| D7 | Overlay the chart on the image, or put it in a strip below? | **Overlay** (as asked), in a translucent panel at the bottom-right. Fall back to a strip below only for narrow frames. |
+| D1 | Which vorticity to chart | **Signed mean** (the readout shows signed and \|ω\|) |
+| D2 | Total KE: extrapolate to the ROI, or sum measured cells | **Measured cells only**, with coverage shown beside it |
+| D3 | Chart style | **Whole run with a moving cursor** |
+| D4 | Include interpolated (`REPLACED`) vectors | **Yes**, in vorticity and KE |
+| D5 | Font | **Embedded TTF** (DejaVu Sans Mono 2.37) |
+| D6 | Save the per-pair values | **Yes**, `stats/` datasets |
+| D7 | Chart placement | **Overlay** (translucent, bottom-right); strip below only for frames narrower than ~480 px |
 
 ## 8. Out of scope
 
