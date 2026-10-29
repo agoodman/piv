@@ -158,7 +158,6 @@ public final class VideoDecoder: @unchecked Sendable {
         thread.start()
     }
 
-    deinit { reader.cancelReading() }
 
     private func run() {
         let rate = info.containerRate
@@ -174,6 +173,10 @@ public final class VideoDecoder: @unchecked Sendable {
                 finish(reader.status == .failed ? PIVError.io("decoding failed: \(reader.error?.localizedDescription ?? "unknown")") : nil)
                 return
             }
+            condition.lock()
+            let stopNow = cancelled
+            condition.unlock()
+            if stopNow { break }
             guard let pb = CMSampleBufferGetImageBuffer(sample) else { continue }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds - info.startTime
             let index = Int((pts * Double(rate.num) / Double(rate.den)).rounded())
@@ -181,6 +184,7 @@ public final class VideoDecoder: @unchecked Sendable {
             if index < range.lowerBound || index <= lastIndex { continue }
             lastIndex = index
             if index >= range.upperBound {
+                reader.cancelReading()
                 finish(nil)
                 return
             }
@@ -189,6 +193,9 @@ public final class VideoDecoder: @unchecked Sendable {
             condition.broadcast()
             condition.unlock()
         }
+        // Cancelled. Only this thread touches the reader: cancelling it from another thread
+        // while copyNextSampleBuffer() runs crashes inside AVFoundation.
+        reader.cancelReading()
         finish(nil)
     }
 
@@ -223,14 +230,13 @@ public final class VideoDecoder: @unchecked Sendable {
         }
     }
 
-    /// Stops decoding (the thread exits at its next frame). Call this when abandoning a
-    /// decoder before the end of its range.
+    /// Stops decoding: the decoding thread cancels the reader and exits after the frame it is
+    /// working on. Call this when abandoning a decoder before the end of its range.
     public func cancel() {
         condition.lock()
         cancelled = true
         condition.broadcast()
         condition.unlock()
-        reader.cancelReading()
     }
 
     /// Decodes the single frame at `index`.

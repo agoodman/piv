@@ -16,7 +16,7 @@ public final class MetalContext: @unchecked Sendable {
     private let lock = NSLock()
 
     /// Kernel sources, compiled as one unit in this order (shared definitions first).
-    static let sourceOrder = ["Common", "Correlate", "Preprocess", "Validate"]
+    static let sourceOrder = ["Common", "Correlate", "Preprocess", "Validate", "Quiver"]
 
     public convenience init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw PIVError.metal("no Metal device") }

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Everything that defines an analysis run. Defaults match `piv analyze`.
@@ -17,7 +18,7 @@ public struct AnalysisRequest: Sendable {
     public var preprocess = PreprocessConfig()
     public var piv: PIVConfig = {
         var c = PIVConfig()
-        c.mask = MaskConfig(minMean: 0.04, minStd: 0.015) // the CLI defaults
+        c.mask = AnalysisRequest.defaultMask
         return c
     }()
     public var scale = ScaleSpec()
@@ -29,6 +30,11 @@ public struct AnalysisRequest: Sendable {
     public var pairsInFlight = 3
 
     public init(source: URL) { self.source = source }
+
+    /// Signal-mask defaults for the stored Y plane: the Rust tool's 0.04 / 0.015 scaled by 1.6.
+    /// Those were tuned on FFmpeg's gray conversion, which on the sample clips is ~1.6× darker
+    /// than Y. On C0141 these give the same no-signal fraction as `piv analyze` (63 vs 63 %).
+    public static let defaultMask = MaskConfig(minMean: 0.064, minStd: 0.024)
 }
 
 /// One analysed pair's frames and capture time (pair midpoint, s from frame 0).
@@ -66,7 +72,7 @@ public struct RunResult: Sendable {
     public var stats: [FlowStats] { smoothedStats ?? rawStats }
 }
 
-public enum RunStage: String, Sendable { case background, analysing, smoothing }
+public enum RunStage: String, Sendable { case background, analysing, smoothing, rendering }
 
 public struct RunProgress: Sendable {
     public var stage: RunStage
@@ -87,7 +93,8 @@ struct PairPlan {
 /// pair, then optional temporal smoothing.
 public func analyzeRun(
     _ req: AnalysisRequest, context ctx: MetalContext,
-    progress: (@Sendable (RunProgress) -> Void)? = nil
+    progress: (@Sendable (RunProgress) -> Void)? = nil,
+    preview: (@Sendable (PreviewFrame) -> Void)? = nil
 ) async throws -> RunResult {
     let info = try await MediaInfo.probe(req.source)
     let capture = CaptureRate.resolve(override: req.captureRate, camera: info.cameraRate, container: info.containerRate)
@@ -122,6 +129,8 @@ public func analyzeRun(
     let decoder = try await VideoDecoder(info: info, range: start..<end, channel: req.channel)
     defer { decoder.cancel() }
     let t0 = Date()
+
+    let previews = try preview.map { _ in try PreviewMaker(context: ctx) }
 
     struct Done: Sendable {
         let pair: Int
@@ -171,6 +180,11 @@ public func analyzeRun(
                     let pair = (f - req.stride - start) / req.pairStep
                     group.addTask {
                         let r = try await analyzer.analyze(a.gpu, b.gpu)
+                        if let previews, let preview, previews.due() {
+                            if let img = try? await previews.render(raw: a, field: r.field) {
+                                preview(PreviewFrame(pair: pair, image: img))
+                            }
+                        }
                         return Done(pair: pair, analyzer: analyzer, result: r, stats: pairStats(r.field, dt: dt))
                     }
                 }
@@ -213,4 +227,43 @@ public func analyzeRun(
         progress?(RunProgress(stage: .smoothing, done: 1, total: 1))
     }
     return result
+}
+
+/// A quiver image of one pair, rendered while a run is in progress.
+public struct PreviewFrame: @unchecked Sendable {
+    public let pair: Int
+    public let image: CGImage
+}
+
+/// Renders at most a couple of preview frames per second during a run. The style is fixed
+/// from the first preview.
+final class PreviewMaker: @unchecked Sendable {
+    private let renderer: QuiverRenderer
+    private let lock = NSLock()
+    private var last = Date.distantPast
+    private var style: QuiverStyle?
+    static let interval = 0.5
+
+    init(context: MetalContext) throws { renderer = try QuiverRenderer(context: context) }
+
+    /// Whether a preview is due now (and claims it).
+    func due() -> Bool {
+        lock.withLock {
+            let now = Date()
+            guard now.timeIntervalSince(last) >= Self.interval else { return false }
+            last = now
+            return true
+        }
+    }
+
+    /// Renders `field` over frame A. Called after the pair's command buffer completed, so the
+    /// frame's upload (queued before it) has too.
+    func render(raw: PreparedFrame, field: VectorField) async throws -> CGImage {
+        let s = lock.withLock { style } ?? {
+            let s = QuiverStyle.auto(raw: raw.raw.floats(raw.gpu.width * raw.gpu.height), field: field)
+            lock.withLock { style = s }
+            return s
+        }()
+        return try await renderer.image(raw: raw.raw, width: raw.gpu.width, height: raw.gpu.height, field: field, style: s)
+    }
 }

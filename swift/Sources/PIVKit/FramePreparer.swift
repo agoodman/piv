@@ -223,6 +223,28 @@ public final class FramePreparer: @unchecked Sendable {
                              raw: raw, storage: storage)
     }
 
+    /// Uploads a frame's intensity (ROI, before background subtraction) without conditioning,
+    /// for drawing. Commits without waiting, like ``prepare(_:)``.
+    public func uploadRaw(_ frame: DecodedFrame) throws -> PreparedFrame {
+        try checkFailure()
+        let tex = try texture(frame.pixelBuffer)
+        guard let cb = ctx.queue.makeCommandBuffer() else { throw PIVError.metal("no command buffer") }
+        let storage = [try pool.take()]
+        let raw = storage[0].buffer
+        let saved = background
+        background = nil
+        defer { background = saved }
+        try encodeUpload(cb, tex, raw: raw, base: raw)
+        let keep = Retained((tex, frame))
+        cb.addCompletedHandler { [weak self] cb in
+            withExtendedLifetime(keep) {}
+            if let e = cb.error { self?.record(PIVError.metal("frame upload failed: \(e)")) }
+        }
+        cb.commit()
+        return PreparedFrame(index: frame.index, gpu: GPUFrame(image: raw, stats: raw, width: roi.width, height: roi.height),
+                             raw: raw, storage: storage)
+    }
+
     private var failure: Error?
     private let failureLock = NSLock()
 

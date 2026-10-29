@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreVideo
 import Foundation
 import Testing
@@ -84,5 +85,60 @@ struct ClipTests {
         #expect(abs(r.dt - 0.005) < 1e-12)
         #expect(r.raw.allSatisfy { $0.grid == r.grid } && r.smoothed?.count == 15)
         #expect(r.raw.map(\.validCount).reduce(0, +) > 0)
+    }
+
+    @Test func sessionStreamsEventsAndRendersTheMovie() async throws {
+        var req = AnalysisRequest(source: c0141)
+        req.frameRange = 200..<230
+        req.stride = 5
+        req.background = nil
+        let session = try PIVSession(context: gpu!)
+        var sawProgress = false, analysed = false
+        var movie: URL?
+        for try await e in session.analyze(req, render: RenderOptions()) {
+            switch e {
+            case .progress: sawProgress = true
+            case .preview: break
+            case .analysed(let r): analysed = r.pairs.count == 25
+            case .finished(_, let m): movie = m
+            }
+        }
+        #expect(sawProgress && analysed)
+        let url = try #require(movie)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let (size, duration) = try await (track.load(.naturalSize), asset.load(.duration))
+        #expect(size == CGSize(width: 1920, height: 1080))
+        #expect(abs(duration.seconds - 25.0 / 30) < 0.05)
+    }
+
+    /// Dropping the stream cancels the run promptly (decoder stopped, nothing left running).
+    @Test func cancellingStopsTheRun() async throws {
+        var req = AnalysisRequest(source: c0141)
+        req.frameRange = 200..<3200
+        req.stride = 5
+        req.background = nil
+        let session = try PIVSession(context: gpu!)
+        let t0 = Date()
+        let consumer = Task { [req] () -> Int in
+            var seen = 0
+            do {
+                for try await e in session.analyze(req, render: RenderOptions()) {
+                    if case .progress(let p) = e, p.stage == .analysing { seen = p.done }
+                }
+            } catch {}
+            return seen
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        consumer.cancel()
+        let pairsSeen = await consumer.value
+        #expect(Date().timeIntervalSince(t0) < 5, "cancellation took too long")
+        #expect(pairsSeen < 2995)
+        // The session still works afterwards.
+        req.frameRange = 200..<212
+        var done = false
+        for try await e in session.analyze(req) { if case .finished = e { done = true } }
+        #expect(done)
     }
 }

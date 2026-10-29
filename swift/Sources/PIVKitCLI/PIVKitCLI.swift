@@ -24,6 +24,7 @@ extension Channel: ExpressibleByArgument {}
 extension FOVAxis: ExpressibleByArgument {}
 extension CorrelationPath: ExpressibleByArgument {}
 extension TemporalSmoothing.Kernel: ExpressibleByArgument {}
+extension MovieWriter.Codec: ExpressibleByArgument {}
 
 struct Info: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "What's in a video file, and what rate was it captured at?")
@@ -69,8 +70,10 @@ struct Analyze: AsyncParsableCommand {
     var window: [Int] = [96, 64]
     @Option(help: "Window overlap fraction.") var overlap: Float = 0.5
     @Option(help: "Passes at the final window size.") var finalIterations = 2
-    @Option(help: "Minimum window mean intensity after background subtraction (0–1).") var minMean: Float = 0.04
-    @Option(help: "Minimum window intensity standard deviation (0–1).") var minStd: Float = 0.015
+    @Option(help: "Minimum window mean intensity after background subtraction (0–1). The Rust tool's 0.04 × 1.6, since the Y plane is brighter than its luma conversion.")
+    var minMean: Float = AnalysisRequest.defaultMask.minMean
+    @Option(help: "Minimum window intensity standard deviation (0–1); the Rust tool's 0.015 × 1.6.")
+    var minStd: Float = AnalysisRequest.defaultMask.minStd
     @Option(help: "Correlation kernels: auto, fused, batched, mpsGraph.") var path = CorrelationPath.auto
     @Option(help: "Pairs analysed concurrently.") var pairsInFlight = 3
 
@@ -89,6 +92,14 @@ struct Analyze: AsyncParsableCommand {
     @Option(help: "Camera-to-light-sheet distance in metres.") var sheetDistance: Double?
     @Option(help: "Light-sheet thickness in mm.") var sheetThicknessMm: Double?
     @Option(help: "Fluid density in kg/m³.") var density = 1.204
+
+    @Flag(help: "Also write a quiver movie, <output>_quiver.mov (smoothed fields when --temporal is set).")
+    var video = false
+    @Option(help: "Playback rate of the quiver movie.") var videoFps = 30.0
+    @Option(help: "Arrow length in image px per px of displacement (default: auto from the first pair).")
+    var quiverScale: Float?
+    @Option(help: "Draw every n-th vector.") var quiverEvery = 1
+    @Option(help: "Movie codec: h264 or hevc.") var codec = MovieWriter.Codec.h264
 
     func run() async throws {
         let src = URL(fileURLWithPath: input)
@@ -141,14 +152,31 @@ struct Analyze: AsyncParsableCommand {
             case .background: "  background \(p.done)/\(p.total)"
             case .analysing: "  \(p.done)/\(p.total) pairs"
             case .smoothing: "  smoothing"
+            case .rendering: "  rendering \(p.done)/\(p.total)"
             }
             FileHandle.standardError.write(Data("\r\(line)          ".utf8))
         }
         if interactive { FileHandle.standardError.write(Data("\r\(String(repeating: " ", count: 60))\r".utf8)) }
         try r.writeNpy(to: out)
-
         print(String(format: "analysed %d pairs in %.1f s (%.1f pairs/s) → %@", r.pairs.count, r.elapsed, Double(r.pairs.count) / r.elapsed, out.path))
         summarize(r)
+        if video {
+            var opts = RenderOptions()
+            opts.url = out.deletingLastPathComponent().appendingPathComponent(out.lastPathComponent + "_quiver.mov")
+            opts.fps = videoFps
+            opts.arrowScale = quiverScale
+            opts.every = quiverEvery
+            opts.codec = codec
+            let t0 = Date()
+            let movie = try await renderQuiverMovie(r, options: opts, context: ctx) { p in
+                guard interactive else { return }
+                FileHandle.standardError.write(Data("\r  rendering \(p.done)/\(p.total)          ".utf8))
+            }
+            if interactive { FileHandle.standardError.write(Data("\r\(String(repeating: " ", count: 60))\r".utf8)) }
+            print(String(format: "movie: %@ (%.1f s, %.0f frames/s)", movie.path, Date().timeIntervalSince(t0),
+                         Double(r.pairs.count) / Date().timeIntervalSince(t0)))
+        }
+
     }
 
     func summarize(_ r: RunResult) {

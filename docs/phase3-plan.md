@@ -565,3 +565,45 @@ for the GPU either: it commits and returns, since later work on the same queue r
 The run is now GPU-bound: the loop's waiting is almost all on pair results. Parity on C0141
 is unchanged (10 of 1.88 M flags differ; median |Δd| 5e-7 px). The remaining distance to
 200 pairs/s is kernel time: ~4.9 ms of correlation plus ~1 ms of preparation per pair.
+
+## 12. Milestone 5 findings (2026-10-29)
+
+### Built
+
+- **`QuiverRenderer`** (Metal): a full-screen pass draws the frame in gray (Rust's
+  `min(raw·gain, 1)·180`), then one instanced draw places every arrow. Arrow geometry is built
+  in the vertex shader (shaft plus ±24° head strokes, as in Rust) and antialiased by distance
+  to the stroke. It uses the same colour map, magenta for replaced vectors, and the same
+  automatic style from the first pair (`QuiverStyle.auto`).
+- **`MovieWriter`** (AVAssetWriter, H.264 or HEVC, ~0.25 bit/pixel, padded to even sizes).
+  `renderQuiverMovie` re-decodes frame A of every pair and draws the fields the run is about
+  (smoothed when smoothing is on, D9) straight into the writer's pixel buffers.
+- **`PIVSession`** (actor): `analyze(request, render:)` returns an `AsyncThrowingStream` of
+  `.progress`, `.preview` (a quiver image at most twice a second during analysis),
+  `.analysed(result)` and `.finished(result, movie:)`. Dropping the stream or cancelling its
+  consumer cancels the run; a partial movie is deleted.
+- **`pivkit analyze --video`** writes `<output>_quiver.mov`.
+
+| C0141, 1 s (995 pairs) | Time | Rate |
+|---|---|---|
+| Analysis (defaults) | 4.4 s | 227 pairs/s |
+| Movie render + encode | 2.3 s | 432 frames/s |
+| Movie size (33 s at 30 fps) | 64 MB | Rust's x264 CRF 18: ~22 Mbit/s, ours ~15 |
+
+### Mask defaults for the Y plane
+
+With the Rust tool's thresholds (`--min-mean 0.04 --min-std 0.015`), the brighter Y plane
+leaves only 15 % of C0141's windows masked as no signal, against **62.6 %** for `piv
+analyze` on its `luma` conversion. The difference shows up as vectors over the unseeded
+background. Scaling both thresholds by the brightness ratio (×1.6 → **0.064 / 0.024**) gives
+**63.2 %** no signal, a match. It also leaves more valid vectors than Rust `luma` (22.8 vs
+16.3 %) and fewer rejected (13.9 vs 21.1 %). These are now PIVKit's defaults
+(`AnalysisRequest.defaultMask`); Rust is unchanged.
+
+### Bug found and fixed: decoder crash on cancel
+
+Three intermittent segfaults (crash reports in `~/Library/Logs/DiagnosticReports`) were
+inside `AVAssetReaderOutput.copyNextSampleBuffer`. `cancel()` called `cancelReading()` from
+another thread while the decoding thread was reading. Only the decoding thread touches the
+reader now; `cancel()` sets a flag. A stress loop (12 runs, 132 decoder cancellations)
+produced no new crashes.
