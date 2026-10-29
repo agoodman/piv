@@ -398,17 +398,12 @@ app, and after milestone 6 for you to use the app.
 | D6 | Saving from the app | **Movie only for now.** HDF5 export was backed out to reduce scope; re-evaluate later. `pivkit` writes `.npy` fields in the Rust layout for parity checks |
 | D7 | Minimum macOS | **15** |
 | D8 | Merging the `rust/` move | **When the phase is complete** |
+| D9 | Movie when smoothing is on | **Smoothed fields only**; the chart shows raw vs smoothed |
 
 **Question from review: can we use 64 × 64 tiles?** Yes for the 64 px passes (most of the
 work), as a fused single-kernel path that uses all 32 KB of threadgroup memory. No for 96 px
 windows without changing the results (§3.2). The fused path is kept only if the milestone 3
 spike shows it is faster than the batched path.
-
-### Still open
-
-| # | Question | Options | Recommendation |
-|---|---|---|---|
-| D9 | Movie rendered from raw or smoothed fields when smoothing is on | (a) smoothed only; (b) side-by-side raw \| smoothed like `piv smooth --video` | **(a)**: the chart already shows raw vs smoothed; side-by-side halves the arrow size |
 
 ## 9. Out of scope
 
