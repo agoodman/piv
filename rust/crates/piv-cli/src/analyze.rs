@@ -26,8 +26,12 @@ use crate::png::PngSink;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ChannelArg {
+    /// FFmpeg's gray conversion (mixes in chroma; see piv_io::decode::Channel).
     Luma,
+    /// Green after conversion to RGB.
     Green,
+    /// The stored Y plane, unconverted (what PIVKit reads).
+    Yplane,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -302,6 +306,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
     let channel = match args.channel {
         ChannelArg::Luma => Channel::Luma,
         ChannelArg::Green => Channel::Green,
+        ChannelArg::Yplane => Channel::Yplane,
     };
     let decode = DecodeOptions {
         start,

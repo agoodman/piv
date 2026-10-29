@@ -57,12 +57,46 @@ public enum CorrelationBenchmark {
             let auto = try corr.kernel(n, .auto)
             for path in [CorrelationPath.fused, .batched, .mpsGraph] {
                 guard let kind = try? corr.kernel(n, path) else { continue }
+                // CPU cost of encoding one pass (median), after a warm-up that builds graphs.
+                var cpu: [Double] = []
+                for i in 0..<12 {
+                    let cb = MPSCommandBuffer(from: ctx.queue)
+                    let t0 = DispatchTime.now().uptimeNanoseconds
+                    _ = try corr.encode(cb, a: a, b: b, n: n, origins: origins, mask: MaskConfig(), path: path)
+                    if i >= 2 { cpu.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6) }
+                    try await ctx.run(cb)
+                }
+                cpu.sort()
+                rows.append(Row(label: "  \(path.rawValue) CPU encode", windows: n, milliseconds: cpu[cpu.count / 2]))
                 let t = try await gpuMilliseconds(ctx, repeats: repeats) { cb in
                     _ = try corr.encode(cb, a: a, b: b, n: n, origins: origins, mask: MaskConfig(), path: path)
                 }
                 let chosen = kind == auto ? "  ← auto" : ""
                 rows.append(Row(label: "\(path.rawValue) (\(origins.count) windows)\(chosen)", windows: n, milliseconds: t))
             }
+        }
+        return rows
+    }
+
+    /// Frame preparation (blur σ 1 + local normalization r 4, the defaults) at 1080p: wall time
+    /// per frame, run alone.
+    public static func prepare(context ctx: MetalContext, repeats: Int = 9) async throws -> [Row] {
+        let (a, _) = try testFrames(ctx)
+        let values = a.stats.floats(a.width * a.height)
+        var rows: [Row] = []
+        for (label, sigma, radius) in [("prepare: blur + normalize", Float(1), 4), ("prepare: blur only", Float(1), 0), ("prepare: normalize only", Float(0), 4)] {
+            var c = PreprocessConfig()
+            c.smoothSigma = sigma
+            c.normalizeRadius = radius
+            let p = try FramePreparer(context: ctx, config: c, roi: ROI(x: 0, y: 0, width: a.width, height: a.height), channel: .luma)
+            var times: [Double] = []
+            for i in 0..<(repeats + 2) {
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                _ = try await p.prepare(raw: values)
+                if i >= 2 { times.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6) }
+            }
+            times.sort()
+            rows.append(Row(label: label + " (wall)", windows: 0, milliseconds: times[times.count / 2]))
         }
         return rows
     }
@@ -82,6 +116,21 @@ public enum CorrelationBenchmark {
             }
             times.sort()
             rows.append(Row(label: "pair 96→64→64, \(path.rawValue) (wall, unpipelined)", windows: 64, milliseconds: times[times.count / 2]))
+        }
+        // Throughput with several pairs in flight on the same prepared frames: the ceiling for
+        // a run once decoding and preparation are out of the way.
+        for k in [2, 3, 4, 6] {
+            let analyzers = try (0..<k).map { _ in try PIVAnalyzer(config: PIVConfig(), context: ctx) }
+            let n = 120
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for (i, an) in analyzers.enumerated() {
+                    group.addTask { for _ in stride(from: i, to: n, by: k) { _ = try await an.analyze(a, b) } }
+                }
+                try await group.waitForAll()
+            }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6 / Double(n)
+            rows.append(Row(label: "pair 96→64→64, auto, \(k) in flight (wall/pair)", windows: 64, milliseconds: ms))
         }
         return rows
     }

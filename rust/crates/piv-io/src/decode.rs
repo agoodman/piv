@@ -12,11 +12,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
-    /// The decoded Y plane: no colour conversion, ~59 % green-weighted.
+    /// FFmpeg's `gray` conversion of the decoded frame. Despite the name this is not the Y
+    /// plane as stored: on the Sony clips (BT.709, limited range) it mixes in chroma and comes
+    /// out ~37 % darker on average than Y (C0141 frame 0: mean 23.3 vs 37.2 DN).
     #[default]
     Luma,
     /// The green channel after conversion to RGB (best match for 532 nm light).
     Green,
+    /// The Y plane exactly as stored (`extractplanes=y`), with no range or colour conversion.
+    /// This is what PIVKit (Swift) reads.
+    Yplane,
 }
 
 /// Region of interest in full-frame pixel coordinates.
@@ -109,6 +114,10 @@ impl FfmpegSource {
             ("gray", 1)
         };
         let mut filters = Vec::new();
+        // Take Y before cropping, so odd ROI offsets don't interact with chroma subsampling.
+        if opts.channel == Channel::Yplane {
+            filters.push("extractplanes=y".into());
+        }
         if opts.roi.is_some() {
             filters.push(format!("crop={width}:{height}:{x}:{y}"));
         }

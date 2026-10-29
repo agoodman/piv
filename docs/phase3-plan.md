@@ -479,3 +479,63 @@ one inverse transform. Measured per pass: 96 px 2.02 ms, 64 px 1.45 ms (MPSGraph
 2.48 ms (custom); 32 px 1.62 ms (fused). **Default pair: 4.9 ms of GPU time (~200 pairs/s
 when pipelined); 8.7 ms wall unpipelined (115 pairs/s).** Parity is unchanged: ≤ 2e-6 px,
 identical flags, on all three paths.
+
+## 11. Milestone 4 findings (2026-10-29)
+
+### The Rust tool's `luma` is not the Y plane
+
+AVFoundation's decoded Y plane is **bit-identical** to FFmpeg's (`extractplanes=y`) on C0141.
+But `piv --channel luma` (FFmpeg `-pix_fmt gray`) does not deliver that plane. FFmpeg's
+gray conversion of these BT.709 limited-range files mixes in chroma: for a given Y the gray
+value spreads over several DN, and on C0141 frame 0 the mean is 23.3 DN against Y's 37.2
+(about 37 % darker). The Rust docs describe `luma` as "the decoded Y plane: no colour
+conversion", so the current behaviour doesn't match its documentation.
+
+- PIVKit reads the stored Y plane (`Channel.luma`).
+- `piv` gains `--channel yplane` (FFmpeg `extractplanes=y`, taken before any ROI crop), so
+  the two can be compared. **`luma` is unchanged**, so existing runs and the phase 1–2
+  thresholds (`--min-mean 0.04 --min-std 0.015`, tuned on the darker conversion) still mean
+  what they did.
+- **Open question:** should Rust's default become `yplane`? The mask thresholds would then
+  apply to brighter values: about 1.6× on average, varying with colour.
+
+### Frame indexing after a seek
+
+AVAssetReader also emits a sample that only *overlaps* the start of the requested time
+range, with its timestamp clipped to the range start. Starting the read half a frame early
+(as the Rust tool does with FFmpeg) therefore produced frame k − 1's picture labelled k, and
+every pair was off by one frame. The reader now starts at the frame's exact rational
+timestamp and never repeats an index. A clip test checks seeked against sequential decoding.
+
+### Parity on a real clip (C0141, 1 s from 0.2 s, stride 5, defaults; Rust `--channel yplane`)
+
+| | Rust | Swift |
+|---|---|---|
+| Valid / rejected / no signal | 47.4 / 37.6 / 15.0 % | 47.4 / 37.6 / 15.0 % |
+| Flags identical | — | 1 878 552 of 1 878 560 (8 differ) |
+| \|Δd\| where both accept | — | median 5e-7 px, p99 1.2e-5 px, max 0.06 px |
+| Mean vorticity / mean KE per pair | — | median relative difference 6e-7 / 1e-7 |
+
+The single 0.06 px outlier sits next to a vector whose flag flipped, so its replacement median
+changed. Preprocessing on the GPU stays within 3.5e-5 of Rust's prepared images. Local
+normalization uses separable box sums in f32 (var = E[v²] − mean²) rather than Rust's f64
+integral image; that is 6× faster, at a cost of 2e-5 to 3e-5 precision.
+
+### Throughput
+
+| Run | Pairs/s |
+|---|---|
+| Swift, C0141 1 s (995 pairs) | 117–129 |
+| Swift, **full C0141 (3 715 pairs) + temporal 9**, 33.5 s end to end | **132** |
+| Rust, same machine today (`main` build, same range) | 17–19 |
+
+Swift is ~7× faster than Rust on this machine today. Both are slower than when phase 1
+measured Rust at 68 pairs/s: a `main` build shows the same drop, so the cause isn't phase 3,
+and Low Power Mode is off. Swift falls short of the ≥ 200 pairs/s target. With frames
+already on the GPU and 3–6 pairs in flight, it tops out at ~130–145 pairs/s (7–7.7 ms per
+pair), against 4.9 ms of measured GPU time per pair. Per-pass CPU encoding is ≤ 0.6 ms, and
+decoding isn't the limit (0.2 s of waiting per 1 000 frames). The remaining gap is
+structural: every pass waits for the CPU to validate and place the next windows, so GPU work
+arrives in bursts and wall timings vary run to run (the same unpipelined pair measured
+9.9–19 ms). Moving validation and window placement onto the GPU would put a whole pair in one
+command buffer. That is the next lever if more speed is wanted.

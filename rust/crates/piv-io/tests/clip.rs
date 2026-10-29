@@ -82,3 +82,29 @@ fn roi_and_green_channel() {
     assert_eq!(f.dim(), (480, 640));
     assert!(f.mean().unwrap() > 0.0);
 }
+
+#[test]
+#[ignore = "needs clips/C0141.MP4"]
+fn yplane_is_unconverted_and_crops_consistently() {
+    let info = probe(&clip()).unwrap();
+    let y = DecodeOptions {
+        channel: Channel::Yplane,
+        ..opts(&info)
+    };
+    let full = read_frame(&clip(), 250, &y).unwrap();
+    let luma = read_frame(&clip(), 250, &opts(&info)).unwrap();
+    // FFmpeg's gray conversion is darker than the stored Y plane on this clip.
+    assert!(full.mean().unwrap() > 1.2 * luma.mean().unwrap());
+    // Whole 8-bit levels: no range or colour conversion.
+    assert!(full.iter().all(|&v| (v * 255.0 - (v * 255.0).round()).abs() < 1e-3));
+    let roi = read_frame(
+        &clip(),
+        250,
+        &DecodeOptions {
+            roi: Some("1201,401,640,480".parse().unwrap()),
+            ..y
+        },
+    )
+    .unwrap();
+    assert_eq!(roi, full.slice(ndarray::s![401..881, 1201..1841]));
+}
