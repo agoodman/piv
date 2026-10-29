@@ -161,9 +161,16 @@ final class Correlator {
         _ cb: MPSCommandBuffer, a: GPUFrame, b: GPUFrame, n: Int, origins: [SIMD4<Float>],
         mask: MaskConfig, path: CorrelationPath
     ) throws -> MTLBuffer {
+        try encode(cb, a: a, b: b, n: n, origins: try ctx.makeBuffer(origins), count: origins.count, mask: mask, path: path)
+    }
+
+    /// As above, with the window origins (`float4` per window) already in a GPU buffer, e.g.
+    /// written by the placement kernel earlier in the same command buffer.
+    func encode(
+        _ cb: MPSCommandBuffer, a: GPUFrame, b: GPUFrame, n: Int, origins originBuf: MTLBuffer, count: Int,
+        mask: MaskConfig, path: CorrelationPath
+    ) throws -> MTLBuffer {
         try WindowSize.check(n)
-        let count = origins.count
-        let originBuf = try ctx.makeBuffer(origins)
         let out = try ctx.makeBuffer(length: count * MemoryLayout<WindowPeak>.stride)
         guard count > 0 else { return out }
         var params = CorrelationParams(

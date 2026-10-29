@@ -63,6 +63,44 @@ struct RustParityGPUTests {
         }
     }
 
+    /// GPU window placement from Rust's predictor reproduces Rust's origins bit for bit.
+    @Test(arguments: cases)
+    func gpuPlacementMatchesRustExactly(_ name: String) async throws {
+        let fx = try RustFixture.load(name)
+        let analyzer = try PIVAnalyzer(config: config(fx), context: ctx)
+        var predictor: VectorField?
+        for (i, pass) in fx.passes.enumerated() {
+            let o = try await analyzer.placeOnGPU(grid: pass.grid, width: fx.width, height: fx.height, predictor: predictor)
+            #expect(o == pass.origins, "\(name) pass \(i)")
+            predictor = pass.validated
+        }
+    }
+
+    /// GPU validation of Rust's raw fields reproduces Rust's validated fields bit for bit.
+    @Test(arguments: cases)
+    func gpuValidationMatchesRustExactly(_ name: String) async throws {
+        let fx = try RustFixture.load(name)
+        let analyzer = try PIVAnalyzer(config: config(fx), context: ctx)
+        for (i, pass) in fx.passes.enumerated() {
+            let v = try await analyzer.validateOnGPU(pass.raw)
+            #expect(v.flags == pass.validated.flags, "\(name) pass \(i): flags")
+            #expect(sameFloats(v.dx, pass.validated.dx) && sameFloats(v.dy, pass.validated.dy), "\(name) pass \(i): values")
+        }
+    }
+
+    /// A traced run returns every pass, and its final field is the untraced result.
+    @Test func tracedRunIsConsistent() async throws {
+        let fx = try RustFixture.load("fog_default")
+        let (a, b) = try frames(fx)
+        let analyzer = try PIVAnalyzer(config: config(fx), context: ctx)
+        let (r, traces) = try await analyzer.analyzeTraced(a, b)
+        #expect(traces.count == fx.passes.count)
+        #expect(traces.last!.validated == r.field)
+        let plain = try await analyzer.analyze(a, b)
+        #expect(plain.field == r.field && plain.summary == r.summary)
+        #expect(r.summary.noSignal == fx.final.flags.filter { $0.contains(.noSignal) }.count)
+    }
+
     /// The whole multi-pass analysis: final fields within 1e-4 px RMS, flags identical.
     @Test(arguments: cases)
     func finalFieldMatchesRust(_ name: String) async throws {

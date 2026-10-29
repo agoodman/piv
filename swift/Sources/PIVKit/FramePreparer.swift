@@ -196,7 +196,12 @@ public final class FramePreparer: @unchecked Sendable {
     }
 
     /// Uploads and prepares one decoded frame.
-    public func prepare(_ frame: DecodedFrame) async throws -> PreparedFrame {
+    /// Encodes and commits the preparation of one decoded frame, without waiting for it.
+    /// Work committed later to the same queue (the correlation of pairs using this frame) runs
+    /// after it, so callers never need to wait. The decoded picture stays alive until the GPU
+    /// is done with it; a GPU failure is reported by the next call (or ``checkFailure()``).
+    public func prepare(_ frame: DecodedFrame) throws -> PreparedFrame {
+        try checkFailure()
         let tex = try texture(frame.pixelBuffer)
         guard let cb = ctx.queue.makeCommandBuffer() else { throw PIVError.metal("no command buffer") }
         var storage = [try pool.take()]
@@ -208,10 +213,26 @@ public final class FramePreparer: @unchecked Sendable {
         }
         try encodeUpload(cb, tex, raw: raw, base: base)
         let image = try encodeConditioning(cb, base: base, storage: &storage)
-        try await ctx.run(cb)
-        withExtendedLifetime(tex) {}
+        let keep = Retained((tex, frame))
+        cb.addCompletedHandler { [weak self] cb in
+            withExtendedLifetime(keep) {}
+            if let e = cb.error { self?.record(PIVError.metal("frame preparation failed: \(e)")) }
+        }
+        cb.commit()
         return PreparedFrame(index: frame.index, gpu: GPUFrame(image: image, stats: base, width: roi.width, height: roi.height),
                              raw: raw, storage: storage)
+    }
+
+    private var failure: Error?
+    private let failureLock = NSLock()
+
+    private func record(_ e: Error) {
+        failureLock.withLock { if failure == nil { failure = e } }
+    }
+
+    /// Throws the first GPU failure of an earlier ``prepare(_:)``, if any.
+    public func checkFailure() throws {
+        if let e = failureLock.withLock({ failure }) { throw e }
     }
 
     /// Blur and local normalization of `base`; returns the conditioned image (or `base` when
@@ -340,4 +361,10 @@ extension MTLBuffer {
     func floats(_ count: Int) -> [Float] {
         Array(UnsafeBufferPointer(start: contents().bindMemory(to: Float.self, capacity: count), count: count))
     }
+}
+
+/// Keeps non-Sendable objects alive inside a GPU completion handler.
+private final class Retained<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
 }

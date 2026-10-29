@@ -4,6 +4,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// No fused multiply-add contraction: each a * b + c rounds twice, as in the Rust reference,
+// so the CPU-ported stages (window placement, validation) reproduce it bit for bit.
+#pragma METAL fp contract(off)
+
 // MARK: - Complex arithmetic (float2 = re, im)
 
 inline float2 cmul(float2 a, float2 b) { return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }

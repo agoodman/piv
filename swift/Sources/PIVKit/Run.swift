@@ -150,8 +150,7 @@ public func analyzeRun(
             func lap(_ acc: inout Double) { let now = Date(); acc += now.timeIntervalSince(tMark); tMark = now }
             defer {
                 if profile {
-                    print(String(format: "profile: waiting for decode %.2f s, prepare %.2f s, pair results %.2f s; GPU busy %.2f s",
-                                 tDecode, tPrepare, tWait, ctx.gpuTime))
+                    print(String(format: "profile: waiting for decode %.2f s, prepare %.2f s, pair results %.2f s", tDecode, tPrepare, tWait))
                 }
             }
             while let frame = try await decoder.nextFrame() {
@@ -160,7 +159,7 @@ public func analyzeRun(
                 let f = frame.index
                 let (aRole, bRole) = (plan.isA(f), plan.isB(f))
                 guard aRole || bRole else { continue }
-                held[f] = try await preparer.prepare(frame)
+                held[f] = try preparer.prepare(frame)
                 lap(&tPrepare)
                 if bRole {
                     guard let a = held[f - req.stride], let b = held[f] else {
@@ -180,6 +179,7 @@ public func analyzeRun(
             }
             while let d = try await group.next() { collect(d) }
             lap(&tWait)
+            try preparer.checkFailure()
         }
     } onCancel: {
         decoder.cancel()

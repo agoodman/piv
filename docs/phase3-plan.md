@@ -539,3 +539,29 @@ structural: every pass waits for the CPU to validate and place the next windows,
 arrives in bursts and wall timings vary run to run (the same unpipelined pair measured
 9.9–19 ms). Moving validation and window placement onto the GPU would put a whole pair in one
 command buffer. That is the next lever if more speed is wanted.
+
+### Decisions from review (2026-10-29)
+
+- **Rust keeps `luma` (FFmpeg's gray conversion) as its default**; `--channel yplane` stays
+  available, and Swift/Rust comparisons use it.
+- **Validation and window placement moved to the GPU** (below).
+
+### Validation on the GPU
+
+Window placement (predictor sampling, symmetric split), pair assembly, the per-vector tests,
+the normalized median test and replacement now run as Metal kernels. All passes of a pair are
+encoded into one command buffer, and the CPU reads back only the final field. The kernels
+repeat Rust's f32 operations in order, with fused multiply-add contraction disabled
+(`#pragma METAL fp contract(off)`). Given Rust's inputs, placement and validation reproduce
+Rust **bit for bit** on every pass of every reference case. Frame preparation no longer waits
+for the GPU either: it commits and returns, since later work on the same queue runs after it.
+
+| | Before | After |
+|---|---|---|
+| One pair, unpipelined (synthetic 1080p) | 8.7–19 ms (noisy) | **6.0 ms** (steady) |
+| C0141 1 s (995 pairs) | 117–129 pairs/s | **161–171 pairs/s** |
+| Full C0141 (3 715 pairs) + temporal 9 | 132 pairs/s | **177 pairs/s** (20.9 s) |
+
+The run is now GPU-bound: the loop's waiting is almost all on pair results. Parity on C0141
+is unchanged (10 of 1.88 M flags differ; median |Δd| 5e-7 px). The remaining distance to
+200 pairs/s is kernel time: ~4.9 ms of correlation plus ~1 ms of preparation per pair.

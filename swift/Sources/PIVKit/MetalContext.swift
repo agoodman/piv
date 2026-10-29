@@ -14,16 +14,9 @@ public final class MetalContext: @unchecked Sendable {
     let library: MTLLibrary
     private var pipelines: [String: MTLComputePipelineState] = [:]
     private let lock = NSLock()
-    /// Total GPU execution time of command buffers run through ``run(_:)`` (profiling).
-    private var gpuSeconds = 0.0
-    public var gpuTime: Double { lock.withLock { gpuSeconds } }
-    private func addGPU(_ cb: MTLCommandBuffer) {
-        let t = cb.gpuEndTime - cb.gpuStartTime
-        lock.withLock { gpuSeconds += t }
-    }
 
     /// Kernel sources, compiled as one unit in this order (shared definitions first).
-    static let sourceOrder = ["Common", "Correlate", "Preprocess"]
+    static let sourceOrder = ["Common", "Correlate", "Preprocess", "Validate"]
 
     public convenience init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw PIVError.metal("no Metal device") }
@@ -88,7 +81,6 @@ public final class MetalContext: @unchecked Sendable {
             cb.addCompletedHandler { _ in c.resume() }
             cb.commit()
         }
-        addGPU(cb)
         if let error = cb.error { throw PIVError.metal("command buffer failed: \(error)") }
     }
 
@@ -102,8 +94,6 @@ public final class MetalContext: @unchecked Sendable {
             last.addCompletedHandler { _ in c.resume() }
             cb.commit()
         }
-        addGPU(first)
-        if last !== first { addGPU(last) }
         if let error = first.error ?? last.error { throw PIVError.metal("command buffer failed: \(error)") }
     }
 }
