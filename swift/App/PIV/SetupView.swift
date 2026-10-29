@@ -23,7 +23,7 @@ struct FramePreview: View {
     @Environment(AppModel.self) private var model
     let info: MediaInfo
     @State private var frame = 0
-    @State private var image: CGImage?
+    @State private var loader: FrameLoader?
     @State private var dragStart: CGPoint?
     @State private var dragRect: CGRect?
 
@@ -35,7 +35,7 @@ struct FramePreview: View {
                 let fit = fitted(in: geo.size)
                 ZStack(alignment: .topLeading) {
                     Color.black
-                    if let image {
+                    if let image = loader?.image {
                         Image(decorative: image, scale: 1)
                             .resizable()
                             .frame(width: fit.width, height: fit.height)
@@ -69,7 +69,10 @@ struct FramePreview: View {
             HStack {
                 Text("Frame")
                 Slider(value: Binding(get: { Double(frame) }, set: { frame = Int($0) }),
-                       in: 0...Double(max(info.frameCount - 1, 1)))
+                       in: 0...Double(max(info.frameCount - 1, 1))) { editing in
+                    // Settle on the exact frame when the drag ends.
+                    if !editing { loader?.request(frame, exact: true) }
+                }
                 Text("\(frame)")
                     .monospacedDigit()
                     .frame(width: 56, alignment: .trailing)
@@ -87,19 +90,12 @@ struct FramePreview: View {
             }
         }
         .padding()
-        .task(id: frame) { await load() }
-    }
-
-    private func load() async {
-        try? await Task.sleep(nanoseconds: 60_000_000) // let the slider settle
-        guard !Task.isCancelled else { return }
-        let gen = AVAssetImageGenerator(asset: AVURLAsset(url: info.url))
-        gen.requestedTimeToleranceBefore = .zero
-        gen.requestedTimeToleranceAfter = .zero
-        let r = info.containerRate
-        let t = CMTimeAdd(CMTime(seconds: info.startTime, preferredTimescale: 600_000),
-                          CMTime(value: Int64(frame) * Int64(r.den), timescale: CMTimeScale(r.num)))
-        if let img = try? await gen.image(at: t).image { image = img }
+        .onChange(of: frame) { _, f in loader?.request(f, exact: false) }
+        .task(id: info.url) {
+            let l = FrameLoader(info: info)
+            loader = l
+            l.request(frame, exact: true)
+        }
     }
 
     private func rect(of r: ROI) -> CGRect { CGRect(x: r.x, y: r.y, width: r.width, height: r.height) }
