@@ -8,7 +8,7 @@ use piv_io::decode::{DecodeOptions, FfmpegSource, FrameSource, read_frame};
 use piv_io::{Channel, probe, resolve_capture_rate};
 
 fn clip() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clips/C0141.MP4")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../clips/C0141.MP4")
 }
 
 fn opts(info: &piv_io::MediaInfo) -> DecodeOptions {

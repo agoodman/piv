@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn clip() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clips/C0141.MP4")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../clips/C0141.MP4")
 }
 
 #[test]

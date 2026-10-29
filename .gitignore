@@ -1,4 +1,10 @@
 .DS_Store
-target/
 out/
 clips/*.MP4
+clips/*.MOV
+clips/*.mov
+rust/target/
+.build/
+.swiftpm/
+xcuserdata/
+DerivedData/
