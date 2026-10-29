@@ -53,7 +53,7 @@ piv analyze clips/C0141.MP4 -o out/run1.h5 --start-s 0.2 --end-s 1.2 --stride 5 
 | `--overlap` | `0.5` | window overlap |
 | `--roi x,y,w,h` | full frame | region of interest |
 | `--background` | `min:40` | static background from N frames sampled across the clip; `none` to disable |
-| `--channel` | `luma` | `luma` or `green` |
+| `--channel` | `luma` | `luma` (FFmpeg's gray conversion), `green`, or `yplane` (the stored Y plane, as PIVKit reads it) |
 | `--format` | `hdf5` | `hdf5` (one file) or `npz` (directory, one file per pair) |
 | `--px-per-mm` / `--fov-deg` + `--sheet-distance` | none | optional physical scale for m/s output |
 
@@ -132,3 +132,18 @@ grid cell to the next. Smaller σ cannot be checked this way; judge it from the 
 - `crates/piv-core`: algorithms with no I/O (FFT correlation, multi-pass, validation, preprocessing, synthetic images)
 - `crates/piv-io`: FFmpeg decoding, capture-rate metadata, scale, HDF5/NPZ writers, quiver rendering
 - `crates/piv-cli`: the `piv` binary
+
+## Comparing with PIVKit (Swift)
+
+`--channel luma` is FFmpeg's gray conversion. On the sample clips it mixes in chroma and is
+~1.6× darker than the stored Y plane, which PIVKit reads. To compare the two implementations
+on the same input, run `piv analyze --channel yplane --format npz` and
+`pivkit analyze` with the same options. Then:
+
+```sh
+python3 rust/scripts/compare_runs.py out/run_rust/ out/run_swift/
+```
+
+`cargo run -p piv-core --example fixtures --release` regenerates the reference cases that
+the Swift parity tests compare against.
+

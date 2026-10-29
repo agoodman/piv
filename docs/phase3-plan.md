@@ -640,3 +640,32 @@ xcodebuild -project swift/App/PIV.xcodeproj -scheme PIV test
   samples (159) than presented frames (151). The frame count now uses the presented
   duration, so background sampling no longer asks for frames that are never decoded. Rust's
   ffprobe `nb_frames` has the same issue.
+
+## 14. Phase 3 summary (2026-10-29)
+
+Built: the Rust workspace moved to `rust/` (Rust behaviour unchanged, plus the additive
+`--channel yplane` and `PivAnalyzer::analyze_traced`); the PIVKit package with the full
+per-pair pipeline on the GPU; `pivkit`; and the Mac app. See `swift/README.md`.
+
+| Goal (§6) | Target | Result |
+|---|---|---|
+| Fixture parity, raw peaks | \|Δd\| < 0.01 px | ≤ 3e-6 px; placement and validation bit for bit |
+| Flags | ≥ 99 % identical | identical on fixtures; 99.9995 % on C0141 |
+| Final field | RMS < 0.02 px | ≤ 1e-6 px RMS |
+| Throughput, fields only | ≥ 200 pairs/s | 161–227 pairs/s depending on masking; 177 on full C0141 with smoothing |
+| Throughput, with movie | ≥ 120 pairs/s | movie rendered after analysis at ~430 frames/s |
+
+What the work turned up, beyond the plan:
+
+1. **FFmpeg's `gray` is not the Y plane** on the sample clips (§11). Rust keeps `luma` as
+   its default; PIVKit uses Y with the mask thresholds ×1.6.
+2. **AVAssetReader clips overlapping samples** at a range start, which shifted pairs by
+   one frame until fixed (§11).
+3. **Edit lists** can leave more samples than presented frames, which affects any
+   `nb_frames`-based frame count, including Rust's (§13).
+4. **The 64 × 64 fused kernel** fits the 32 KB threadgroup limit but is slower than the
+   batched path (occupancy); it wins only at 32 px (§10).
+
+Open for later: HDF5 export (D6, deferred); a second look at window sizes now that
+smoothing and CV scoring exist; whether Rust's default channel should change; and
+iPhone slo-mo speed-ramp detection.
