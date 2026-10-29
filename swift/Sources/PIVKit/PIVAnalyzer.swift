@@ -60,7 +60,7 @@ public final class PIVAnalyzer: @unchecked Sendable {
         self.config = config
         self.path = path
         correlator = Correlator(context: context)
-        for n in Set(config.windows) { _ = try correlator.usesFused(n, path) }
+        for n in Set(config.windows) { _ = try correlator.kernel(n, path) }
     }
 
     /// Grid of the final pass for an image of the given size.

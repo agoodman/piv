@@ -36,7 +36,7 @@ struct RustParityGPUTests {
 
     /// Each pass, given Rust's predictor: same origins (exactly), and raw correlation peaks
     /// within 1e-4 px (f32 rounding; measured ≤ 3e-6) with the same NO_SIGNAL decisions.
-    @Test(arguments: cases, [CorrelationPath.auto, .batched])
+    @Test(arguments: cases, [CorrelationPath.auto, .batched, .mpsGraph])
     func rawPeaksMatchRustPassByPass(_ name: String, _ path: CorrelationPath) async throws {
         let fx = try RustFixture.load(name)
         let (a, b) = try frames(fx)

@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalPerformanceShadersGraph
 
 /// The Metal device, command queue and compiled kernels shared by PIVKit's GPU stages.
 ///
@@ -81,6 +82,19 @@ public final class MetalContext: @unchecked Sendable {
             cb.commit()
         }
         if let error = cb.error { throw PIVError.metal("command buffer failed: \(error)") }
+    }
+
+    /// Commits an MPS command buffer and waits for all of it. MPSGraph may commit part of the
+    /// work early and continue in a new underlying buffer, so this waits on the last one (same
+    /// queue, so it finishes last) and checks the first and last for errors.
+    func run(_ cb: MPSCommandBuffer) async throws {
+        let first = cb.rootCommandBuffer
+        let last = cb.commandBuffer
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            last.addCompletedHandler { _ in c.resume() }
+            cb.commit()
+        }
+        if let error = first.error ?? last.error { throw PIVError.metal("command buffer failed: \(error)") }
     }
 }
 

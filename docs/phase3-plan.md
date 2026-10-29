@@ -470,3 +470,12 @@ three passes run back to back with CPU validation in between and nothing overlap
 Pipelining pairs (milestones 4–5) should bring wall time close to the GPU time. The
 ≥ 200 pairs/s target needs the hybrid FFT plus the inverse-packing trick: the cross spectrum
 of a real pair is Hermitian, so two windows' inverse transforms can share one complex FFT.
+
+### Decision and result (2026-10-29)
+
+Adopted the MPSGraph FFT for windows ≥ 64 px (`auto`), with the custom batched FFT for 48 px
+and the fused kernel for ≤ 32 px. Both batched paths now pack two windows' cross spectra into
+one inverse transform. Measured per pass: 96 px 2.02 ms, 64 px 1.45 ms (MPSGraph); 48 px
+2.48 ms (custom); 32 px 1.62 ms (fused). **Default pair: 4.9 ms of GPU time (~200 pairs/s
+when pipelined); 8.7 ms wall unpipelined (115 pairs/s).** Parity is unchanged: ≤ 2e-6 px,
+identical flags, on all three paths.

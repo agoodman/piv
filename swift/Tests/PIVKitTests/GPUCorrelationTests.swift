@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalPerformanceShadersGraph
 import Testing
 @testable import PIVKit
 
@@ -19,15 +20,16 @@ struct GPUCorrelationTests {
     let ctx = gpu!
 
     @Test func kernelsCompile() throws {
-        for name in ["correlate_fused", "load_windows", "fft_lines", "cross_spectrum", "find_peaks"] {
+        for name in ["correlate_fused", "load_windows", "fft_lines", "cross_spectrum_packed", "find_peaks"] {
             _ = try ctx.pipeline(name)
         }
     }
 
     /// A periodic random pattern shifted circularly correlates perfectly (Rust:
     /// `integer_shift_is_exact_for_circular_content`).
-    @Test(arguments: [(32, CorrelationPath.fused), (32, .batched), (64, .fused), (64, .batched),
-                      (24, .batched), (48, .batched), (96, .batched), (128, .batched)])
+    @Test(arguments: [(32, CorrelationPath.fused), (32, .batched), (32, .mpsGraph), (64, .fused), (64, .batched),
+                      (64, .mpsGraph), (24, .batched), (48, .batched), (48, .mpsGraph), (96, .batched),
+                      (96, .mpsGraph), (128, .batched)])
     func integerShiftIsExactForCircularContent(_ n: Int, _ path: CorrelationPath) async throws {
         var rng = TestRNG(state: 7)
         let a = (0..<n * n).map { _ in rng.uniform() }
@@ -44,7 +46,7 @@ struct GPUCorrelationTests {
         #expect(p.ppr > 2)
     }
 
-    @Test(arguments: [CorrelationPath.fused, .batched])
+    @Test(arguments: [CorrelationPath.fused, .batched, .mpsGraph])
     func flatWindowHasNoPeak(_ path: CorrelationPath) async throws {
         let img = [Float](repeating: 0.3, count: 32 * 32)
         let f = try ctx.makeFrame(image: img, stats: img, width: 32, height: 32)
@@ -53,7 +55,7 @@ struct GPUCorrelationTests {
         #expect(p.status == 2)
     }
 
-    @Test(arguments: [CorrelationPath.fused, .batched])
+    @Test(arguments: [CorrelationPath.fused, .batched, .mpsGraph])
     func maskRejectsDarkWindows(_ path: CorrelationPath) async throws {
         var rng = TestRNG(state: 3)
         let img = (0..<32 * 32).map { _ in 0.005 * rng.uniform() }
@@ -81,13 +83,15 @@ struct GPUCorrelationTests {
         #expect(abs(p.ppr - 4) < 1e-3, "\(p)")
     }
 
-    /// Runs the `find_peaks` kernel on given real planes.
+    /// Runs the `find_peaks` kernel on given real planes (one per packed plane, as its real
+    /// part, so each is window 2j of a pair).
     func findPeaks(planes: [[Float]], n: Int) async throws -> [WindowPeak] {
+        precondition(planes.count == 1, "one plane: window 0 reads the real part of packed plane 0")
         let data = planes.flatMap { $0.map { SIMD2<Float>($0, 0) } }
         let planeBuf = try ctx.makeBuffer(data)
         let out = try ctx.makeBuffer(planes.map { _ in WindowPeak(dx: 0, dy: 0, ppr: 0, height: 1, status: 0) })
         var params = CorrelationParams(n: UInt32(n), width: 0, height: 0, count: UInt32(planes.count), minMean: 0, minStd: 0, log2n: 0)
-        let cb = ctx.queue.makeCommandBuffer()!
+        let cb = MPSCommandBuffer(from: ctx.queue)
         let enc = cb.makeComputeCommandEncoder()!
         enc.setComputePipelineState(try ctx.pipeline("find_peaks"))
         enc.setBuffer(planeBuf, offset: 0, index: 0)
@@ -103,7 +107,7 @@ struct GPUCorrelationTests {
     @Test func layoutsMatchMetal() {
         #expect(MemoryLayout<WindowPeak>.stride == 20)
         #expect(MemoryLayout<CorrelationParams>.stride == 28)
-        #expect(MemoryLayout<FFTLineParams>.stride == 72)
+        #expect(MemoryLayout<FFTLineParams>.stride == 76)
     }
 
     @Test func windowSizes() {

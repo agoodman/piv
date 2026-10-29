@@ -7,9 +7,10 @@
 //   inverse is decimation-in-frequency, which leaves the correlation bit-reversed; the
 //   compaction step undoes that.
 //
-// * The batched kernels keep the planes in device memory and transform all rows of all windows,
-//   then all columns, with a mixed-radix (2, 3, 4) Stockham FFT per line in threadgroup memory.
-//   Any n = 2^a·3^b up to 128 works.
+// * The batched kernels keep the planes in device memory: load, forward 2-D FFT, cross spectrum
+//   (two windows packed per plane), inverse 2-D FFT, peak. The FFTs are either fft_lines below
+//   (all rows of all windows, then all columns, with a mixed-radix (2, 3, 4) Stockham FFT per
+//   line in threadgroup memory; any n = 2^a·3^b up to 128) or MPSGraph's.
 
 // MARK: - Fused path
 
@@ -171,6 +172,7 @@ struct FFTLineParams {
     uint inverse;
     uint stages;
     uint radix[8];
+    uint check_status;     // skip planes whose window status isn't OK (not for packed planes)
 };
 
 /// Unnormalized DFT of every line (row or column) of every plane, in place in device memory.
@@ -188,7 +190,7 @@ kernel void fft_lines(device float2* data [[buffer(0)]],
     uint line = tg * p.lines_per_tg + local;
     bool active = local < p.lines_per_tg && line < p.lines;
     uint window = line / p.lines_per_window;
-    if (active && status[window].status != STATUS_OK) active = false;
+    if (active && p.check_status && status[window].status != STATUS_OK) active = false;
     uint base = window * p.window_stride + (line % p.lines_per_window) * p.line_stride;
     threadgroup float2* x = buf + local * 2 * n;
     threadgroup float2* y = x + n;
@@ -244,26 +246,49 @@ kernel void fft_lines(device float2* data [[buffer(0)]],
         for (uint i = lt; i < n; i += tpl) data[base + i * p.elem_stride] = x[i];
 }
 
-/// conj(A)·B for every plane, in place. One thread per element; the thread with the lower
-/// index of each (k, −k) pair does both.
-kernel void cross_spectrum(device float2* planes [[buffer(0)]],
-                           constant CorrParams& p [[buffer(1)]],
-                           device const WindowPeak* status [[buffer(2)]],
-                           uint gid [[thread_position_in_grid]]) {
-    uint nn = p.n * p.n;
-    uint w = gid / nn;
-    if (w >= p.count || status[w].status != STATUS_OK) return;
-    cross_spectrum_pair(planes + w * nn, p.n, gid % nn);
+/// conj(A)·B for every window, two windows per output plane: P = C₀ + i·C₁ for windows 2j and
+/// 2j + 1. Each Cᵢ is Hermitian (it is the spectrum of a real correlation), so the inverse
+/// transform of P is c₀ + i·c₁ exactly, and one inverse FFT serves two windows. Windows that
+/// weren't correlated (or a missing partner) contribute zero. One thread per element of each
+/// output plane; the thread with the lower index of each (k, −k) pair writes both.
+kernel void cross_spectrum_packed(device const float2* planes [[buffer(0)]],
+                                  constant CorrParams& p [[buffer(1)]],
+                                  device const WindowPeak* status [[buffer(2)]],
+                                  device float2* packed [[buffer(3)]],
+                                  uint gid [[thread_position_in_grid]]) {
+    uint n = p.n, nn = n * n;
+    uint j = gid / nn, e = gid % nn;
+    if (2 * j >= p.count) return;
+    uint ky = e / n, kx = e % n;
+    uint m = ((n - ky) % n) * n + (n - kx) % n;
+    if (e > m) return;
+    float2 c[2];
+    for (uint h = 0; h < 2; h++) {
+        uint w = 2 * j + h;
+        c[h] = 0;
+        if (w < p.count && status[w].status == STATUS_OK) {
+            device const float2* z = planes + w * nn;
+            float2 Z = z[e], Zm = conj(z[m]);
+            float2 A = 0.5f * (Z + Zm);
+            float2 B = mul_i(0.5f * (Z - Zm), -1.0f);
+            c[h] = cmul(conj(A), B);
+        }
+    }
+    device float2* out = packed + j * nn;
+    out[e] = c[0] + mul_i(c[1], 1.0f);
+    if (m != e) out[m] = conj(c[0]) + mul_i(conj(c[1]), 1.0f);
 }
 
+/// Window 2j's correlation is the real part of packed plane j, window 2j + 1's the imaginary.
 struct DevicePlane {
     device const float2* plane;
     float scale;
-    float operator()(uint i) const { return plane[i].x * scale; }
+    bool imag;
+    float operator()(uint i) const { return (imag ? plane[i].y : plane[i].x) * scale; }
 };
 
-/// Peak, peak ratio and sub-pixel position of each correlation plane. One threadgroup per
-/// window.
+/// Peak, peak ratio and sub-pixel position of each window's correlation, from the packed
+/// inverse transforms. One threadgroup per window.
 kernel void find_peaks(device const float2* planes [[buffer(0)]],
                        constant CorrParams& p [[buffer(1)]],
                        device WindowPeak* out [[buffer(2)]],
@@ -278,6 +303,6 @@ kernel void find_peaks(device const float2* planes [[buffer(0)]],
     WindowPeak in = out[w];
     if (in.status != STATUS_OK) return;
     uint nn = p.n * p.n;
-    WindowPeak r = find_peak(DevicePlane{planes + w * nn, in.height}, p.n, tid, T, lane, sg, nsg, sv, si);
+    WindowPeak r = find_peak(DevicePlane{planes + (w / 2) * nn, in.height, (w & 1) != 0}, p.n, tid, T, lane, sg, nsg, sv, si);
     if (tid == 0) out[w] = r;
 }
