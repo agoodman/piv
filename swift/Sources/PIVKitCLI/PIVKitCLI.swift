@@ -180,23 +180,12 @@ struct Analyze: AsyncParsableCommand {
     }
 
     func summarize(_ r: RunResult) {
-        var (vectors, noSignal, rejected, replaced) = (0, 0, 0, 0)
-        var mags: [Float] = []
-        for f in r.raw {
-            for k in f.flags.indices {
-                vectors += 1
-                let fl = f.flags[k]
-                if fl.contains(.noSignal) { noSignal += 1 }
-                else if !fl.isValid { rejected += 1; if fl.contains(.replaced) { replaced += 1 } }
-                else if vectors % 3 == 0 { mags.append(hypotf(f.dx[k], f.dy[k])) }
-            }
-        }
-        mags.sort()
-        func pct(_ q: Double) -> Float { mags.isEmpty ? .nan : mags[Int((Double(mags.count - 1) * q).rounded())] }
-        let n = Double(max(vectors, 1))
+        let s = RunSummary(r)
         print(String(format: "vectors: %.1f%% valid, %.1f%% rejected (%.1f%% replaced), %.1f%% no signal",
-                     100 * Double(vectors - noSignal - rejected) / n, 100 * Double(rejected) / n, 100 * Double(replaced) / n, 100 * Double(noSignal) / n))
-        print(String(format: "|d| (px/pair): median %.2f, p95 %.2f, p99 %.2f", pct(0.5), pct(0.95), pct(0.99)))
+                     100 * s.valid, 100 * s.rejected, 100 * s.replaced, 100 * s.noSignal))
+        print(String(format: "|d| (px/pair): median %.2f, p95 %.2f, p99 %.2f; noise ≈ %.2f px", s.medianDisplacement,
+                     s.p95Displacement, s.p99Displacement, s.noise))
+        if let h = s.strideHint { print("hint: \(h)") }
     }
 }
 

@@ -16,6 +16,13 @@ public struct CameraRate: Hashable, Sendable, Codable {
     public var raw: String
     /// Camera make and model, if the metadata names it.
     public var camera: String?
+
+    public init(rate: FrameRate, source: String, raw: String, camera: String? = nil) {
+        self.rate = rate
+        self.source = source
+        self.raw = raw
+        self.camera = camera
+    }
 }
 
 /// The rate used for timing, and where it came from.

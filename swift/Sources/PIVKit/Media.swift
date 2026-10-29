@@ -46,6 +46,21 @@ public struct MediaInfo: Sendable {
 
     public var playbackDuration: Double { containerRate.time(ofFrame: Double(frameCount)) }
 
+    public init(url: URL, fileSize: Int64, codec: String, width: Int, height: Int, bitDepth: Int, fullRange: Bool,
+                frameCount: Int, containerRate: FrameRate, startTime: Double, cameraRate: CameraRate?) {
+        self.url = url
+        self.fileSize = fileSize
+        self.codec = codec
+        self.width = width
+        self.height = height
+        self.bitDepth = bitDepth
+        self.fullRange = fullRange
+        self.frameCount = frameCount
+        self.containerRate = containerRate
+        self.startTime = startTime
+        self.cameraRate = cameraRate
+    }
+
     /// Probes `url` with AVFoundation plus the camera-metadata probes.
     public static func probe(_ url: URL) async throws -> MediaInfo {
         let asset = AVURLAsset(url: url)
@@ -62,11 +77,13 @@ public struct MediaInfo: Sendable {
         let fullRange = (ext[kCMFormatDescriptionExtension_FullRangeVideo] as? Bool) ?? false
         let codec = fourCC(CMFormatDescriptionGetMediaSubType(format))
 
-        // Count samples without decoding; fall back to duration × rate.
+        // Frames presented: the track's duration × rate. The sample count can be larger when
+        // an edit list trims frames from presentation (e.g. a clip cut without re-encoding),
+        // and those frames are never decoded, so use the smaller of the two.
         var frameCount = Int((timeRange.duration.seconds * containerRate.fps).rounded())
         if try await track.load(.canProvideSampleCursors),
            let cursor = track.makeSampleCursorAtFirstSampleInDecodeOrder() {
-            frameCount = Int(cursor.stepInDecodeOrder(byCount: Int64(Int32.max))) + 1
+            frameCount = min(frameCount, Int(cursor.stepInDecodeOrder(byCount: Int64(Int32.max))) + 1)
         }
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         return MediaInfo(

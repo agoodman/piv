@@ -42,6 +42,11 @@ public struct PairTiming: Hashable, Sendable {
     public var frameA: Int
     public var frameB: Int
     public var time: Double
+    public init(frameA: Int, frameB: Int, time: Double) {
+        self.frameA = frameA
+        self.frameB = frameB
+        self.time = time
+    }
 }
 
 /// The result of a run: raw (validated) fields, and smoothed fields when requested.
@@ -67,6 +72,29 @@ public struct RunResult: Sendable {
     /// Wall-clock seconds for the analysis loop (excluding the background estimate).
     public var elapsed: Double
 
+    public init(request: AnalysisRequest, info: MediaInfo, capture: CaptureRate, frames: Range<Int>, dt: Double, grid: Grid,
+                roi: ROI, scale: Scale?, energyUnits: EnergyUnits, pairs: [PairTiming], raw: [VectorField],
+                summaries: [ValidationSummary], rawStats: [FlowStats], smoothed: [VectorField]? = nil,
+                support: [[UInt16]]? = nil, smoothedStats: [FlowStats]? = nil, elapsed: Double) {
+        self.request = request
+        self.info = info
+        self.capture = capture
+        self.frames = frames
+        self.dt = dt
+        self.grid = grid
+        self.roi = roi
+        self.scale = scale
+        self.energyUnits = energyUnits
+        self.pairs = pairs
+        self.raw = raw
+        self.summaries = summaries
+        self.rawStats = rawStats
+        self.smoothed = smoothed
+        self.support = support
+        self.smoothedStats = smoothedStats
+        self.elapsed = elapsed
+    }
+
     /// The fields the result is about: smoothed when smoothing was requested.
     public var fields: [VectorField] { smoothed ?? raw }
     public var stats: [FlowStats] { smoothedStats ?? rawStats }
@@ -78,6 +106,11 @@ public struct RunProgress: Sendable {
     public var stage: RunStage
     public var done: Int
     public var total: Int
+    public init(stage: RunStage, done: Int, total: Int) {
+        self.stage = stage
+        self.done = done
+        self.total = total
+    }
 }
 
 /// Frame roles and pair list for a run: the same rules as `piv analyze`.

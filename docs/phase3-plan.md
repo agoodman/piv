@@ -607,3 +607,36 @@ inside `AVAssetReaderOutput.copyNextSampleBuffer`. `cancel()` called `cancelRead
 another thread while the decoding thread was reading. Only the decoding thread touches the
 reader now; `cancel()` sets a flag. A stress loop (12 runs, 132 decoder cancellations)
 produced no new crashes.
+
+## 13. Milestone 6: the Mac app (2026-10-29)
+
+`swift/App/PIV.xcodeproj` (synchronized folders, local package `../..`, sandboxed with
+user-selected file access, ad-hoc signed for local runs). Build and test:
+
+```sh
+xcodebuild -project swift/App/PIV.xcodeproj -scheme PIV build
+xcodebuild -project swift/App/PIV.xcodeproj -scheme PIV test
+```
+
+- **Setup:** open (⌘O) or drop a clip. A frame preview with a scrubber sets the start and
+  end of the range, and dragging on the frame draws the ROI. The form covers capture rate
+  (prefilled from metadata, with its source and a warning when only the container rate is
+  known), stride, pair step and dt, then scale (none, px/mm, or FOV + axis + distance, with
+  the resolved mm/px), the temporal smoothing toggle, and an Advanced section (windows,
+  overlap, passes, background, preprocessing, mask, validation, movie fps). Settings are
+  remembered per clip.
+- **Running:** stage, progress, pairs/s, ETA, a live quiver preview (twice a second), Cancel.
+- **Result:** the quiver movie in `AVPlayerView` (frame stepping). The readout overlay (t,
+  pair, ω, |ω|, KE total and per mass, coverage) follows playback. Swift Charts shows mean
+  vorticity and total KE with a cursor (click to seek; raw dim behind smoothed when smoothing
+  is on), next to the run summary. Export Movie… copies the `.mov`.
+- **Tests:** 8 app tests (state machine against a scripted fake service; settings →
+  request mapping). They caught a bug where the capture-rate note disappeared when the rate
+  matched the metadata. A DEBUG-only smoke hook (`PIV_SMOKE_CLIP`, `PIV_SMOKE_OUT`) runs the
+  real app unattended on a clip in its container and saves snapshots, the first preview and
+  the movie. That confirmed open → run → result, previews and a valid 145-frame movie in the
+  sandbox.
+- **Bug found and fixed in PIVKit:** a clip cut without re-encoding (edit list) has more
+  samples (159) than presented frames (151). The frame count now uses the presented
+  duration, so background sampling no longer asks for frames that are never decoded. Rust's
+  ffprobe `nb_frames` has the same issue.
