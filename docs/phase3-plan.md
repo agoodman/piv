@@ -419,3 +419,54 @@ spike shows it is faster than the batched path.
 - An iOS/iPadOS app. `PIVKit` uses nothing Mac-only except the app layer, so that could come
   later.
 - Ensemble correlation (abandoned in phase 1).
+
+## 10. Milestone 3 findings (2026-10-29)
+
+### Parity with Rust
+
+The GPU correlation matches `piv-core` to **f32 rounding**: on every pass of all seven
+reference cases (particles, rotation, shear at 48/24 px, a 20 px shift, fog with the default
+96 → 64 windows and preprocessing, background + mask, blank half), the worst raw-peak
+difference is **3e-6 px**, peak ratios agree to 7e-7 (relative), and NO_SIGNAL decisions and
+final flags are **identical**. Final-field RMS differences are 2e-7 to 1e-6 px. The CPU stages
+(window placement, validation) match Rust bit for bit. The tests now require 1e-4 px rather
+than the planned 0.01 px, so any regression shows.
+
+### Kernel timings (M5 Max, 1920×1080, 50 % overlap; GPU time per pass, median)
+
+| Window (windows per pass) | Fused (threadgroup memory) | Batched (custom FFT) | Hybrid (MPSGraph FFT) |
+|---|---|---|---|
+| 96 px (819) | — (doesn't fit) | 2.95 ms | **2.52 ms** |
+| 64 px (1 888) | 3.42 ms | 2.70 ms | **1.70 ms** |
+| 48 px (3 404) | — (not a power of two) | **2.98 ms** | 3.38 ms |
+| 32 px (7 854) | **1.62 ms** | 2.90 ms | 1.95 ms |
+
+Breakdown of the batched path at 64 px: load 0.34, forward FFT 0.97, cross spectrum 0.19,
+inverse FFT 0.97, peak 0.13 ms. **The FFT is ~75 % of the time** and costs about the same at
+every window size (~1 ms per direction), so it is limited by memory traffic, not arithmetic.
+Two attempts to speed up the custom FFT didn't help: moving the twiddle table out of `constant`
+memory made no difference, and re-mapping loads/stores for coalesced column access made it
+~35 % *slower* (reverted).
+
+- **The fused 64 × 64 kernel is slower than batched** (3.42 vs 2.70 ms), as the occupancy
+  concern in §3.2 predicted: a 32 KB threadgroup leaves each GPU core very few windows in
+  flight. At 32 px (an 8 KB plane) the fused kernel is the fastest option. `auto` now uses
+  fused only for windows ≤ 32 px.
+- **MPSGraph's FFT is faster than mine at 64 and 96 px** (and at 32), slower at 48. Wrapped
+  around my load / cross-spectrum / peak kernels in one command buffer ("hybrid"), it gives
+  the same peaks as the custom path to 7e-7 px.
+
+### Per pair (default 96 → 64 → 64)
+
+| | GPU time per pair | Pairs/s if the GPU is kept busy |
+|---|---|---|
+| Batched (current default) | 8.4 ms | ~120 |
+| Fused 64 | 9.8 ms | ~100 |
+| Hybrid (MPSGraph FFT at 64/96) | 5.9 ms | ~170 |
+| Hybrid + packing two inverse transforms into one (estimate) | ~5.0 ms | ~200 |
+
+Measured wall time today is **10.5 ms per pair (95 pairs/s, 1.4× Rust's 68)**, because the
+three passes run back to back with CPU validation in between and nothing overlaps.
+Pipelining pairs (milestones 4–5) should bring wall time close to the GPU time. The
+≥ 200 pairs/s target needs the hybrid FFT plus the inverse-packing trick: the cross spectrum
+of a real pair is Hermitian, so two windows' inverse transforms can share one complex FFT.
