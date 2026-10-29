@@ -1,0 +1,111 @@
+{
+  "background": null,
+  "frame_a": "frame_a.f32",
+  "frame_b": "frame_b.f32",
+  "height": 160,
+  "name": "particles_shear_48_24",
+  "passes": [
+    {
+      "grid": {
+        "nx": 5,
+        "ny": 5,
+        "step": 24,
+        "window": 48,
+        "x0": 8,
+        "y0": 8
+      },
+      "origins": "pass0_origins.f32",
+      "raw": {
+        "dx": "pass0_raw_dx.f32",
+        "dy": "pass0_raw_dy.f32",
+        "flags": "pass0_raw_flags.u8",
+        "peak_ratio": "pass0_raw_ppr.f32"
+      },
+      "validated": {
+        "dx": "pass0_dx.f32",
+        "dy": "pass0_dy.f32",
+        "flags": "pass0_flags.u8",
+        "peak_ratio": "pass0_ppr.f32"
+      }
+    },
+    {
+      "grid": {
+        "nx": 12,
+        "ny": 12,
+        "step": 12,
+        "window": 24,
+        "x0": 2,
+        "y0": 2
+      },
+      "origins": "pass1_origins.f32",
+      "raw": {
+        "dx": "pass1_raw_dx.f32",
+        "dy": "pass1_raw_dy.f32",
+        "flags": "pass1_raw_flags.u8",
+        "peak_ratio": "pass1_raw_ppr.f32"
+      },
+      "validated": {
+        "dx": "pass1_dx.f32",
+        "dy": "pass1_dy.f32",
+        "flags": "pass1_flags.u8",
+        "peak_ratio": "pass1_ppr.f32"
+      }
+    },
+    {
+      "grid": {
+        "nx": 12,
+        "ny": 12,
+        "step": 12,
+        "window": 24,
+        "x0": 2,
+        "y0": 2
+      },
+      "origins": "pass2_origins.f32",
+      "raw": {
+        "dx": "pass2_raw_dx.f32",
+        "dy": "pass2_raw_dy.f32",
+        "flags": "pass2_raw_flags.u8",
+        "peak_ratio": "pass2_raw_ppr.f32"
+      },
+      "validated": {
+        "dx": "pass2_dx.f32",
+        "dy": "pass2_dy.f32",
+        "flags": "pass2_flags.u8",
+        "peak_ratio": "pass2_ppr.f32"
+      }
+    }
+  ],
+  "piv": {
+    "final_iterations": 2,
+    "mask": {
+      "min_mean": 0.0,
+      "min_std": 0.0
+    },
+    "overlap": 0.5,
+    "validation": {
+      "median_eps": 0.10000000149011612,
+      "median_threshold": 2.0,
+      "ppr_threshold": 1.2999999523162842,
+      "replace": true
+    },
+    "windows": [
+      48,
+      24
+    ]
+  },
+  "prepared_a": "prepared_a.f32",
+  "prepared_b": "prepared_b.f32",
+  "preprocess": {
+    "normalize_eps": 0.0,
+    "normalize_radius": 0,
+    "smooth_sigma": 0.0
+  },
+  "summary": {
+    "low_ppr": 0,
+    "median_outliers": 8,
+    "no_signal": 0,
+    "out_of_range": 0,
+    "replaced": 8
+  },
+  "width": 160
+}

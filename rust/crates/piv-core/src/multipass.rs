@@ -69,6 +69,17 @@ pub struct PairResult {
     pub summary: ValidationSummary,
 }
 
+/// What one pass of [`PivAnalyzer::analyze_traced`] did.
+#[derive(Debug, Clone)]
+pub struct PassTrace {
+    /// Window origins `[ax, ay, bx, by]` (top-left, fractional px) per grid cell, row-major.
+    pub origins: Vec<[f32; 4]>,
+    /// The correlation result before validation.
+    pub raw: VectorField,
+    /// After validation (and replacement).
+    pub validated: VectorField,
+}
+
 /// Runs the configured multi-pass analysis on prepared frame pairs. Construct once and reuse:
 /// FFT plans are built up front.
 pub struct PivAnalyzer {
@@ -123,6 +134,27 @@ impl PivAnalyzer {
 
     /// Displacement field from frame `a` to frame `b`, in pixels.
     pub fn analyze(&self, a: &PreparedFrame, b: &PreparedFrame) -> crate::Result<PairResult> {
+        self.run(a, b, None)
+    }
+
+    /// Like [`analyze`](Self::analyze), but also returns what each pass did. Used to generate
+    /// reference data for other implementations (the Swift/Metal port).
+    pub fn analyze_traced(
+        &self,
+        a: &PreparedFrame,
+        b: &PreparedFrame,
+    ) -> crate::Result<(PairResult, Vec<PassTrace>)> {
+        let mut traces = Vec::new();
+        let result = self.run(a, b, Some(&mut traces))?;
+        Ok((result, traces))
+    }
+
+    fn run(
+        &self,
+        a: &PreparedFrame,
+        b: &PreparedFrame,
+        mut trace: Option<&mut Vec<PassTrace>>,
+    ) -> crate::Result<PairResult> {
         let (h, w) = a.dim();
         if b.dim() != (h, w) {
             return Err(PivError::ShapeMismatch {
@@ -140,11 +172,20 @@ impl PivAnalyzer {
         let mut result: Option<PairResult> = None;
         for win in passes {
             let grid = Grid::new(h, w, win, self.cfg.overlap)?;
-            let mut field = self.pass(a, b, &grid, result.as_ref().map(|r| &r.field));
+            let (mut field, origins) =
+                self.pass(a, b, &grid, result.as_ref().map(|r| &r.field));
+            let raw = trace.is_some().then(|| field.clone());
             let limits = Limits {
                 max_displacement: self.cfg.windows[0] as f32 / 2.0,
             };
             let summary = validate(&mut field, &self.cfg.validation, limits);
+            if let (Some(t), Some(raw)) = (trace.as_deref_mut(), raw) {
+                t.push(PassTrace {
+                    origins,
+                    raw,
+                    validated: field.clone(),
+                });
+            }
             result = Some(PairResult { field, summary });
         }
         Ok(result.expect("at least one pass"))
@@ -156,7 +197,7 @@ impl PivAnalyzer {
         b: &PreparedFrame,
         grid: &Grid,
         predictor: Option<&VectorField>,
-    ) -> VectorField {
+    ) -> (VectorField, Vec<[f32; 4]>) {
         let (h, w) = a.dim();
         let n = grid.window;
         let plan = &self.plans[&n];
@@ -166,7 +207,7 @@ impl PivAnalyzer {
         let max_x = (w - n).saturating_sub(1) as f32;
         let max_y = (h - n).saturating_sub(1) as f32;
 
-        let cells: Vec<(f32, f32, f32, u8)> = (0..grid.len())
+        let cells: Vec<(f32, f32, f32, u8, [f32; 4])> = (0..grid.len())
             .into_par_iter()
             .map_init(
                 || plan.workspace(),
@@ -194,26 +235,29 @@ impl PivAnalyzer {
                             f.stats.stats(x.round() as usize, y.round() as usize, n, n);
                         mean >= mask.min_mean && std >= mask.min_std
                     };
+                    let origins = [ax, ay, bx, by];
                     if !has_signal(a, ax, ay) || !has_signal(b, bx, by) {
-                        return (f32::NAN, f32::NAN, 0.0, flags::NO_SIGNAL);
+                        return (f32::NAN, f32::NAN, 0.0, flags::NO_SIGNAL, origins);
                     }
                     match plan.correlate(ws, &a.image, (ax, ay), &b.image, (bx, by)) {
-                        Some(p) => (bx - ax + p.dx, by - ay + p.dy, p.ppr, 0),
-                        None => (f32::NAN, f32::NAN, 0.0, flags::NO_SIGNAL),
+                        Some(p) => (bx - ax + p.dx, by - ay + p.dy, p.ppr, 0, origins),
+                        None => (f32::NAN, f32::NAN, 0.0, flags::NO_SIGNAL, origins),
                     }
                 },
             )
             .collect();
 
         let mut field = VectorField::new(grid.clone());
-        for (k, (dx, dy, ppr, fl)) in cells.into_iter().enumerate() {
+        let mut origins = Vec::with_capacity(cells.len());
+        for (k, (dx, dy, ppr, fl, o)) in cells.into_iter().enumerate() {
             let idx = [k / grid.nx, k % grid.nx];
             field.dx[idx] = dx;
             field.dy[idx] = dy;
             field.peak_ratio[idx] = ppr;
             field.flags[idx] = fl;
+            origins.push(o);
         }
-        field
+        (field, origins)
     }
 }
 
